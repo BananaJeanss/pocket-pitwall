@@ -37,3 +37,15 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
+
+      # Compose 1.12+ requires compileSdk 37 and AGP 9.1.2+, so keep
+      # calendar-major BOM upgrades tied to the deliberate AGP migration.
+      - dependency-name: "androidx.compose:compose-bom"
+        update-types:
+          - "version-update:semver-major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
