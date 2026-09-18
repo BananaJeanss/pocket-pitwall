@@ -44,6 +44,15 @@ updates:
         update-types:
           - "version-update:semver-major"
 
+      # CodeQL 2.27.0 cannot instrument Kotlin 2.4.20 yet. Keep the
+      # supported 2.4.10 toolchain until CodeQL adds 2.4.20 support.
+      - dependency-name: "org.jetbrains.kotlin.android"
+        versions:
+          - "2.4.20"
+      - dependency-name: "org.jetbrains.kotlin.plugin.compose"
+        versions:
+          - "2.4.20"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
