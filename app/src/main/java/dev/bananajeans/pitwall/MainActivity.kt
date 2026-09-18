@@ -126,9 +126,12 @@ class MainActivity : ComponentActivity() {
         val session = sessions.find { it.id == exportId }
         if (uri != null && session != null) scope.launch {
             busy=true
+            var staged: java.io.File? = null
             try {
                 withContext(Dispatchers.IO) {
-                    requireNotNull(context.contentResolver.openOutputStream(uri)).use { out ->
+                    val suffix = ".$exportType"
+                    staged = java.io.File.createTempFile("pitwall-export-", suffix, context.cacheDir)
+                    staged!!.outputStream().buffered().use { out ->
                         when (exportType) {
                             "csv" -> {
                                 val raw = store.raw(session.id)
@@ -137,18 +140,35 @@ class MainActivity : ComponentActivity() {
                             }
                             "json" -> out.write(session.json().toString(2).toByteArray())
                             else -> ZipOutputStream(out).use { zip ->
-                                fun entry(name: String, content: String) { zip.putNextEntry(ZipEntry(name)); zip.write(content.toByteArray()); zip.closeEntry() }
-                                entry("session.json", session.json().toString(2)); entry("laps.csv", store.lapCsv(session))
+                                fun entry(name: String, body: String) {
+                                    zip.putNextEntry(ZipEntry(name))
+                                    zip.write(body.toByteArray())
+                                    zip.closeEntry()
+                                }
+                                entry("session.json", session.json().toString(2))
+                                entry("laps.csv", store.lapCsv(session))
                                 zip.putNextEntry(ZipEntry("sensors.csv"))
-                                store.raw(session.id).takeIf { it.exists() }?.inputStream()?.use { it.copyTo(zip) }
+                                val raw = store.raw(session.id)
+                                require(raw.isFile) { "Sensor data is unavailable for this session." }
+                                raw.inputStream().use { it.copyTo(zip) }
                                 zip.closeEntry()
                             }
                         }
                     }
+                    require(staged!!.length() > 0L) { "Export produced no data." }
+                    requireNotNull(context.contentResolver.openOutputStream(uri, "wt")).use { target ->
+                        staged!!.inputStream().buffered().use { source -> source.copyTo(target) }
+                        target.flush()
+                    }
                 }
                 notice("Export saved")
-            } catch (e: Exception) { notice("Export failed: ${e.message}") }
-            finally { busy=false }
+            } catch (e: Exception) {
+                runCatching { context.contentResolver.delete(uri, null, null) }
+                notice("Export failed: ${e.message}")
+            } finally {
+                withContext(Dispatchers.IO) { staged?.delete() }
+                busy=false
+            }
         }
     }
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
