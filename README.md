@@ -8,7 +8,7 @@ Built with **Kotlin, Jetpack Compose and Material 3**. Charcoal surfaces, lime h
 > **This app does not measure indoor track position or instantaneous speed.** A phone moving inside a pocket cannot reliably reconstruct those quantities from inertial sensors alone. Track sketches are user-drawn references. Lap suggestions are experimental pattern matches, not transponder timing. Average speed is calculated only when you enter a known lap length.
 
 > [!NOTE]
-> **AI-generated notice:** The initial source code, UI and documentation were generated with OpenAI Codex. This is an experimental prototype, not a professionally validated timing instrument. The Java analysis checks passed in the authoring environment. Android compilation, lint, visual QA and physical-device recording have **not yet been verified**. Do not read the presence of a CI workflow as evidence that it has run successfully.
+> **AI-generated notice:** The initial source code, UI and documentation were generated with OpenAI Codex. This is an experimental prototype, not a professionally validated timing instrument. The 12 Java analysis checks, Android lint and debug APK assembly passed in [GitHub Actions run #2](https://github.com/BananaJeanss/pocket-pitwall/actions/runs/35318236279) on 18 September 2026. Physical-device recording and visual QA have **not yet been verified**. A successful build does not establish real-world timing accuracy.
 
 ## What it does
 
