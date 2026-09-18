@@ -130,7 +130,11 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     requireNotNull(context.contentResolver.openOutputStream(uri)).use { out ->
                         when (exportType) {
-                            "csv" -> out.write(store.lapCsv(session).toByteArray())
+                            "csv" -> {
+                                val raw = store.raw(session.id)
+                                require(raw.isFile) { "Sensor data is unavailable for this session." }
+                                raw.inputStream().use { it.copyTo(out) }
+                            }
                             "json" -> out.write(session.json().toString(2).toByteArray())
                             else -> ZipOutputStream(out).use { zip ->
                                 fun entry(name: String, content: String) { zip.putNextEntry(ZipEntry(name)); zip.write(content.toByteArray()); zip.closeEntry() }
@@ -240,7 +244,7 @@ class MainActivity : ComponentActivity() {
             Text("Timeline: add SF at each finish crossing. S2 and S3 mark the starts of sectors 2 and 3. Use track timing or video to identify crossings.")
             Text("Suggestions are estimated matches. Track sketches are references, not measured positions. Average speed needs a known lap length.")
             Text("Graphs use independent scales. Comparisons align lap time, not physical location. Pocket motion includes movement of your body.")
-            Text("Details: edit notes, sketch a track or export ZIP (all data), CSV (laps), or JSON (metadata).")
+            Text("Details: edit notes, sketch a track or export ZIP (all data), CSV (raw sensor telemetry), or JSON (metadata).")
         }
     },confirmButton={TextButton(onClick={help=false}) { Text("Got it") }})
     deleteTarget?.let { session -> AlertDialog(onDismissRequest={deleteTarget=null},title={Text("Delete session?")},text={Text("This removes ${session.title} and its sensor data. Export first to keep a copy.")},
