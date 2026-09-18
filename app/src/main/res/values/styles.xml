@@ -1,0 +1,1 @@
+<resources><style name="Theme.Pitwall" parent="android:style/Theme.Material.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:windowLightStatusBar">false</item><item name="android:colorAccent">#C4F568</item><item name="android:windowActionModeOverlay">true</item><item name="android:windowBackground">#101410</item></style></resources>
