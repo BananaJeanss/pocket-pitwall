@@ -105,7 +105,6 @@ class MainActivity : ComponentActivity() {
     fun notice(message: String) { scope.launch { snackbar.showSnackbar(message) } }
     fun back() { if (selectedId != null) selectedId=null else destination="Record" }
     BackHandler(selectedId != null || destination != "Record") { back() }
-    LaunchedEffect(settings.defaultTrack, settings.defaultReverse) { if (!active) { title=settings.defaultTrack; reverse=settings.defaultReverse } }
     LaunchedEffect(active) { if (!active) SessionRepository.refresh() }
     LaunchedEffect(saveError, recordingError) { (saveError ?: recordingError)?.let { snackbar.showSnackbar(it) } }
     suspend fun checkUpdates() { update=UpdateState.Checking; update=UpdateChecker.check(context.applicationContext) }
@@ -202,7 +201,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
             "Settings" -> Column(contentModifier.verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
-                SettingsScreen(settings,changeSettings,update,{scope.launch { checkUpdates() }},::open)
+                SettingsScreen(settings,{ next ->
+                    if (next.defaultTrack != settings.defaultTrack) title=next.defaultTrack
+                    if (next.defaultReverse != settings.defaultReverse) reverse=next.defaultReverse
+                    changeSettings(next)
+                },update,{scope.launch { checkUpdates() }},::open)
             }
             else -> Column(contentModifier.verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(20.dp)) {
                 if (update is UpdateState.Available) AssistChip(onClick={open((update as UpdateState.Available).url)},label={Text("Update available")},leadingIcon={Icon(Icons.Default.SystemUpdate,null)})

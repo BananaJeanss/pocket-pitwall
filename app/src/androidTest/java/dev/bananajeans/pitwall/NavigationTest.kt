@@ -1,31 +1,39 @@
 package dev.bananajeans.pitwall
 
-import android.graphics.Bitmap
+import java.io.FileInputStream
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.espresso.Espresso.pressBack
+import androidx.test.espresso.Espresso.closeSoftKeyboard
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.bananajeans.pitwall.core.Telemetry
 import org.junit.Rule
 import org.junit.Test
 import org.junit.Assert.assertEquals
-import java.io.File
 
 class NavigationTest {
     @get:Rule val ui = createAndroidComposeRule<MainActivity>()
 
     private fun screenshot(name: String) {
+        require(name.matches(Regex("[a-zA-Z0-9-]+")))
         ui.waitForIdle()
-        val context=InstrumentationRegistry.getInstrumentation().targetContext
-        val dir=File(context.getExternalFilesDir(null),"screenshots").apply { mkdirs() }
-        InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()?.let { bitmap ->
-            File(dir,"$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG,100,it) }
-            bitmap.recycle()
+        val automation=InstrumentationRegistry.getInstrumentation().uiAutomation
+        // Shell-owned output survives the test runner uninstalling the app.
+        fun shell(command: String) {
+            automation.executeShellCommand(command).use { descriptor ->
+                FileInputStream(descriptor.fileDescriptor).use { it.readBytes() }
+            }
         }
+        shell("mkdir -p /data/local/tmp/pitwall-screenshots")
+        shell("screencap -p /data/local/tmp/pitwall-screenshots/$name.png")
     }
 
     @Test fun destinationsAndSystemBack() {
         ui.onNodeWithText("Start recording").assertIsDisplayed()
+        ui.onNodeWithText("Track").performTextReplacement("Draft track")
+        closeSoftKeyboard()
+        ui.activityRule.scenario.recreate()
+        ui.onNodeWithText("Draft track").assertExists()
         screenshot("01-record")
         ui.onAllNodesWithText("Settings").onLast().performClick()
         ui.onNodeWithText("Appearance").assertIsDisplayed()
@@ -67,10 +75,12 @@ class NavigationTest {
         ui.onNodeWithText("Details").performClick()
         ui.onNodeWithText("Session details").assertIsDisplayed()
         ui.onNodeWithText("Kart, conditions, notes").performTextInput("Persist across recreation")
+        closeSoftKeyboard()
         ui.activityRule.scenario.recreate()
         ui.onNodeWithText("Session details").assertIsDisplayed()
         ui.onNodeWithText("Persist across recreation").assertExists()
         ui.waitUntil(5000) { SessionStore(ui.activity).list().any { it.id==fixture.id && it.notes=="Persist across recreation" } }
+        closeSoftKeyboard()
         pressBack()
         ui.onNodeWithText(fixture.title).assertIsDisplayed()
         ui.runOnIdle {
