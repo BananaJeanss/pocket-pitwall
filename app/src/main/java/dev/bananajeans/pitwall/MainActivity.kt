@@ -151,6 +151,21 @@ class MainActivity : ComponentActivity() {
             finally { busy=false }
         }
     }
+    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            busy=true
+            try {
+                val imported = withContext(Dispatchers.IO) {
+                    requireNotNull(context.contentResolver.openInputStream(uri)).use { store.importZip(it) }
+                }
+                SessionRepository.refresh()
+                selectedId=null
+                destination="Sessions"
+                notice("Imported ${imported.title}")
+            } catch (e: Exception) { notice("Import failed: ${e.message}") }
+            finally { busy=false }
+        }
+    }
     val selected = sessions.find { it.id == selectedId }
     val reviewScroll = rememberSaveable(selectedId, section, saver=ScrollState.Saver) { ScrollState(0) }
     Scaffold(
@@ -190,6 +205,15 @@ class MainActivity : ComponentActivity() {
         } else when (destination) {
             "Sessions" -> LazyColumn(contentModifier,contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 if (!ready) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                item {
+                    OutlinedButton(
+                        enabled=!busy && !active,
+                        onClick={importer.launch(arrayOf("application/zip","application/octet-stream"))},
+                        modifier=Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.FileOpen,null); Spacer(Modifier.width(8.dp)); Text("Import session ZIP")
+                    }
+                }
                 if (ready && sessions.isEmpty()) item {
                     Column(Modifier.fillMaxWidth().padding(vertical=48.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(16.dp)) {
                         Icon(Icons.Default.History,null,Modifier.size(48.dp)); Text("No sessions yet")
@@ -244,7 +268,7 @@ class MainActivity : ComponentActivity() {
             Text("Timeline: add SF at each finish crossing. S2 and S3 mark the starts of sectors 2 and 3. Use track timing or video to identify crossings.")
             Text("Suggestions are estimated matches. Track sketches are references, not measured positions. Average speed needs a known lap length.")
             Text("Graphs use independent scales. Comparisons align lap time, not physical location. Pocket motion includes movement of your body.")
-            Text("Details: edit notes, sketch a track or export ZIP (all data), CSV (raw sensor telemetry), or JSON (metadata).")
+            Text("Sessions: import a Pocket Pitwall ZIP backup. Details: edit notes, sketch a track or export ZIP (all data), CSV (raw sensor telemetry), or JSON (metadata).")
         }
     },confirmButton={TextButton(onClick={help=false}) { Text("Got it") }})
     deleteTarget?.let { session -> AlertDialog(onDismissRequest={deleteTarget=null},title={Text("Delete session?")},text={Text("This removes ${session.title} and its sensor data. Export first to keep a copy.")},
