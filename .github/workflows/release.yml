@@ -124,9 +124,12 @@ jobs:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
 
+      - id: gradle-version
+        name: Read Gradle version
+        run: echo "version=$(cat gradle/ci-version.txt)" >> "$GITHUB_OUTPUT"
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: ${{ steps.gradle-version.outputs.version }}
 
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
