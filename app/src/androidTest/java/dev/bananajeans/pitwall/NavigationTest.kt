@@ -30,6 +30,10 @@ class NavigationTest {
         ui.onAllNodesWithText("Settings").onLast().performClick()
         ui.onNodeWithText("Appearance").assertIsDisplayed()
         screenshot("02-settings")
+        ui.onNodeWithContentDescription("Fullscreen").performClick()
+        ui.onNodeWithText("Appearance").assertIsDisplayed()
+        screenshot("05-fullscreen")
+        ui.onNodeWithContentDescription("Fullscreen").performClick()
         pressBack()
         ui.onNodeWithText("Start recording").assertIsDisplayed()
         ui.onAllNodesWithText("Sessions").onLast().performClick()
@@ -62,10 +66,18 @@ class NavigationTest {
         ui.onNodeWithText("Motion timeline").assertIsDisplayed()
         ui.onNodeWithText("Details").performClick()
         ui.onNodeWithText("Session details").assertIsDisplayed()
+        ui.onNodeWithText("Kart, conditions, notes").performTextInput("Persist across recreation")
         ui.activityRule.scenario.recreate()
         ui.onNodeWithText("Session details").assertIsDisplayed()
+        ui.onNodeWithText("Persist across recreation").assertExists()
+        ui.waitUntil(5000) { SessionStore(ui.activity).list().any { it.id==fixture.id && it.notes=="Persist across recreation" } }
         pressBack()
         ui.onNodeWithText(fixture.title).assertIsDisplayed()
-        ui.runOnIdle { SessionRepository.delete(fixture.id) }
+        ui.runOnIdle {
+            SessionRepository.save(fixture.copy(notes="Queued write"))
+            SessionRepository.delete(fixture.id)
+            SessionRepository.save(fixture.copy(notes="Stale write after delete"))
+        }
+        ui.waitUntil(5000) { SessionStore(ui.activity).list().none { it.id==fixture.id } }
     }
 }

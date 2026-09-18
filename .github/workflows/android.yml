@@ -27,7 +27,7 @@ jobs:
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Test, lint and assemble
-        run: gradle --no-daemon :core:check :app:lintDebug :app:assembleDebug
+        run: gradle --no-daemon :core:check :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
       - uses: actions/upload-artifact@v4
         with:
           name: pocket-pitwall-debug-apk
@@ -46,10 +46,7 @@ jobs:
           arch: x86_64
           profile: pixel_2
           disable-animations: true
-          script: gradle --no-daemon :app:connectedDebugAndroidTest
-      - name: Collect screenshots
-        if: always()
-        run: adb pull /sdcard/Android/data/dev.bananajeans.pitwall/files/screenshots screenshots || true
+          script: ./scripts/test-android.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
