@@ -5,8 +5,35 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 6
+
+    # Keep low-risk dependency updates together, but keep build tooling isolated.
     groups:
-      gradle-dependencies:
+      kotlin-toolchain:
+        applies-to: version-updates
         patterns:
-          - "*"
+          - "org.jetbrains.kotlin.android"
+          - "org.jetbrains.kotlin.plugin.compose"
+        update-types:
+          - "minor"
+          - "patch"
+
+      android-libraries:
+        applies-to: version-updates
+        patterns:
+          - "androidx.*"
+          - "org.jetbrains.kotlinx:*"
+        exclude-patterns:
+          - "androidx.compose:compose-bom"
+        update-types:
+          - "minor"
+          - "patch"
+
+    # AGP and Gradle have a strict compatibility matrix. Patch updates within
+    # the current AGP line are safe for automation; minor/major upgrades are
+    # handled manually together with the matching Gradle version and migrations.
+    ignore:
+      - dependency-name: "com.android.application"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
