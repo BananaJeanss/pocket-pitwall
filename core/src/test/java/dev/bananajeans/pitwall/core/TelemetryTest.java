@@ -25,6 +25,12 @@ public final class TelemetryTest {
         check(Telemetry.suggest(flat,5,40).isEmpty(),"No hallucinated laps on flat signal");
         boolean invalid=false; try { Telemetry.suggest(signal,5,0); } catch(IllegalArgumentException e) { invalid=true; }
         check(invalid,"Reject invalid configuration");
+        check(ReleaseVersion.newer("v0.10.0","0.2.0"),"Compare versions numerically");
+        check(!ReleaseVersion.newer("v0.2.0","0.2.0"),"Ignore current version");
+        check(!ReleaseVersion.newer("v0.1.0","0.2.0"),"Ignore downgrade");
+        check(!ReleaseVersion.newer("v0.3.0-beta","0.2.0"),"Ignore prerelease");
+        check(!ReleaseVersion.newer("v999999999999.0.0","0.2.0"),"Reject overflow");
+        check(!ReleaseVersion.newer("v0.03.0","0.2.0"),"Reject malformed version");
         System.out.println("PASS: "+checks+" telemetry checks");
     }
 }

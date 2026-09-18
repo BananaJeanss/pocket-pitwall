@@ -6,3 +6,5 @@ local.properties
 *.jks
 *.keystore
 .DS_Store
+release-assets/
+*.p12

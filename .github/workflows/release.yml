@@ -1,0 +1,78 @@
+name: Publish signed release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag, for example v0.2.0'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      PITWALL_KEYSTORE_PATH: ${{ github.workspace }}/release-signing.jks
+      PITWALL_STORE_PASSWORD: ${{ secrets.PITWALL_STORE_PASSWORD }}
+      PITWALL_KEY_ALIAS: ${{ secrets.PITWALL_KEY_ALIAS }}
+      PITWALL_KEY_PASSWORD: ${{ secrets.PITWALL_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Validate version and signing configuration
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PITWALL_KEYSTORE_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import os,re,pathlib,base64
+          tag=os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',tag):
+              raise SystemExit('Use a stable vMAJOR.MINOR.PATCH tag.')
+          build=pathlib.Path('app/build.gradle.kts').read_text()
+          if f'versionName = "{tag[1:]}"' not in build:
+              raise SystemExit('Tag must match Android versionName.')
+          required=['KEYSTORE_BASE64','PITWALL_STORE_PASSWORD','PITWALL_KEY_ALIAS','PITWALL_KEY_PASSWORD']
+          if any(not os.environ.get(key) for key in required):
+              raise SystemExit('Configure the four signing secrets described in docs/releases.md. No unsigned or debug-signed release will be published.')
+          key=pathlib.Path(os.environ['PITWALL_KEYSTORE_PATH'])
+          key.write_bytes(base64.b64decode(os.environ['KEYSTORE_BASE64'],validate=True))
+          key.chmod(0o600)
+          PY
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Test, lint and build signed APK
+        run: gradle --no-daemon :core:check :app:lintRelease :app:assembleRelease
+      - name: Verify signing and stage assets
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/app-release.apk "release-assets/pocket-pitwall-${RELEASE_TAG}.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "release-assets/pocket-pitwall-${RELEASE_TAG}.apk"
+          cd release-assets
+          sha256sum *.apk > SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "Pocket Pitwall $RELEASE_TAG" --generate-notes
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$PITWALL_KEYSTORE_PATH"
