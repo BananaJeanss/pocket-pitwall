@@ -26,14 +26,18 @@ Keep these as secrets, not repository variables. The workflow writes the key onl
 ## Publish
 
 1. Increment both `versionCode` and `versionName` in `app/build.gradle.kts`; never reuse a version code.
-2. Push to `main` and wait for the build and emulator checks to pass.
-3. Tag that tested commit with the matching stable version, such as `v0.2.0`, and push the tag.
-4. The **Publish signed release** workflow signs and publishes the APK. It can also be manually dispatched for an existing tag. Existing releases are not overwritten.
+2. Push the version bump to `main`.
+3. The **Publish signed release** workflow runs core tests and release lint, builds and verifies the signed APK, creates the matching `vMAJOR.MINOR.PATCH` tag, then publishes the GitHub Release automatically.
+4. If that version tag already exists, an automatic run skips publishing instead of overwriting it. The workflow can also be manually dispatched for an existing tag when recovery is needed.
 
 Automatic update checks use GitHub's latest stable release, compare semantic version numbers, and require an APK asset. Prereleases are ignored. Checks are limited to once per day on launch unless manually requested. The download action opens GitHub; installation is always controlled by Android and the user. No self-install permissions or background installer are used.
 
 ## Prototype migration
 
-The old 0.1 debug APK and CI debug artifacts are not production releases. A new signing key usually cannot update them in place. Export sessions before uninstalling a debug build. Import/restore is not yet implemented, so exported data remains available for external analysis, not automatic restoration into the app. Once installed from a stable release key, later releases using the same key and a higher version code can update in place.
+The old 0.1/0.2 debug APKs and CI debug artifacts are not production releases. CI runners use disposable debug signing keys, so APKs from different runs can fail Android's signature check and cannot reliably update one another in place.
+
+Before uninstalling a debug build, export every session as a ZIP. Stable releases can import those ZIP backups from the Sessions screen, restoring session metadata and raw sensor telemetry. Then uninstall the debug build, install the signed release, and import the backups.
+
+Once a stable release is installed, later releases signed with the same release key and carrying a higher version code update in place and keep private session data automatically.
 
 CI debug APK artifacts remain available for development testing. They are not advertised by the in-app stable update checker.
