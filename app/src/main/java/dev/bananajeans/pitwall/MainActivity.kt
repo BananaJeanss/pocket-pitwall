@@ -46,8 +46,6 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +79,7 @@ class MainActivity : ComponentActivity() {
 @Composable private fun Pitwall(settings: AppSettings, changeSettings: (AppSettings) -> Unit) {
     val context = LocalContext.current
     val store = remember { SessionStore(context) }
+    val backups = remember { BackupStore(context) }
     val scope = rememberCoroutineScope()
     val sessions by SessionRepository.sessions.collectAsStateWithLifecycle()
     val ready by SessionRepository.ready.collectAsStateWithLifecycle()
@@ -139,20 +138,7 @@ class MainActivity : ComponentActivity() {
                                 raw.inputStream().use { it.copyTo(out) }
                             }
                             "json" -> out.write(session.json().toString(2).toByteArray())
-                            else -> ZipOutputStream(out).use { zip ->
-                                fun entry(name: String, body: String) {
-                                    zip.putNextEntry(ZipEntry(name))
-                                    zip.write(body.toByteArray())
-                                    zip.closeEntry()
-                                }
-                                entry("session.json", session.json().toString(2))
-                                entry("laps.csv", store.lapCsv(session))
-                                zip.putNextEntry(ZipEntry("sensors.csv"))
-                                val raw = store.raw(session.id)
-                                require(raw.isFile) { "Sensor data is unavailable for this session." }
-                                raw.inputStream().use { it.copyTo(zip) }
-                                zip.closeEntry()
-                            }
+                            else -> store.writeZip(session, out)
                         }
                     }
                     require(staged!!.length() > 0L) { "Export produced no data." }
@@ -185,6 +171,60 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) { notice("Import failed: ${e.message}") }
             finally { busy=false }
         }
+    }
+    val backupFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            try {
+                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, flags)
+                val previous = settings.backupTreeUri
+                changeSettings(settings.copy(backupTreeUri=uri.toString(), autoBackups=true))
+                if (previous.isNotBlank() && previous != uri.toString()) {
+                    runCatching { context.contentResolver.releasePersistableUriPermission(Uri.parse(previous), flags) }
+                }
+                scope.launch {
+                    busy=true
+                    try {
+                        val result = withContext(Dispatchers.IO) { backups.backupAll(store, sessions, uri.toString()) }
+                        notice(if (result.failed == 0) "Backup folder ready · ${result.backedUp} sessions backed up"
+                            else "Backup folder ready · ${result.backedUp} saved, ${result.failed} failed")
+                    } catch (e: Exception) { notice("Backup folder failed: ${e.message}") }
+                    finally { busy=false }
+                }
+            } catch (e: Exception) { notice("Cannot use that folder: ${e.message}") }
+        }
+    }
+    fun backupNow() {
+        if (settings.backupTreeUri.isBlank()) { notice("Choose a backup folder first"); return }
+        scope.launch {
+            busy=true
+            try {
+                val result = withContext(Dispatchers.IO) { backups.backupAll(store, sessions, settings.backupTreeUri) }
+                notice(if (result.failed == 0) "Backed up ${result.backedUp} sessions"
+                    else "Backed up ${result.backedUp} · ${result.failed} failed")
+            } catch (e: Exception) { notice("Backup failed: ${e.message}") }
+            finally { busy=false }
+        }
+    }
+    fun restoreBackups() {
+        if (settings.backupTreeUri.isBlank()) { notice("Choose a backup folder first"); return }
+        scope.launch {
+            busy=true
+            try {
+                val result = withContext(Dispatchers.IO) { backups.restoreMissing(store, settings.backupTreeUri) }
+                SessionRepository.refresh()
+                notice("Restored ${result.imported} · ${result.skipped} already here · ${result.failed} failed")
+            } catch (e: Exception) { notice("Restore failed: ${e.message}") }
+            finally { busy=false }
+        }
+    }
+    fun disconnectBackupFolder() {
+        val tree = settings.backupTreeUri
+        if (tree.isBlank()) return
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        runCatching { context.contentResolver.releasePersistableUriPermission(Uri.parse(tree), flags) }
+        changeSettings(settings.copy(backupTreeUri=""))
+        notice("Backup folder disconnected")
     }
     val selected = sessions.find { it.id == selectedId }
     val reviewScroll = rememberSaveable(selectedId, section, saver=ScrollState.Saver) { ScrollState(0) }
@@ -249,11 +289,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
             "Settings" -> Column(contentModifier.verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
-                SettingsScreen(settings,{ next ->
-                    if (next.defaultTrack != settings.defaultTrack) title=next.defaultTrack
-                    if (next.defaultReverse != settings.defaultReverse) reverse=next.defaultReverse
-                    changeSettings(next)
-                },update,{scope.launch { checkUpdates() }},::open)
+                SettingsScreen(
+                    settings=settings,
+                    change={ next ->
+                        if (next.defaultTrack != settings.defaultTrack) title=next.defaultTrack
+                        if (next.defaultReverse != settings.defaultReverse) reverse=next.defaultReverse
+                        changeSettings(next)
+                    },
+                    update=update,
+                    check={scope.launch { checkUpdates() }},
+                    open=::open,
+                    backupFolder=backups.folderLabel(settings.backupTreeUri),
+                    backupBusy=busy,
+                    chooseBackupFolder={backupFolderPicker.launch(null)},
+                    backupNow=::backupNow,
+                    restoreBackups=::restoreBackups,
+                    disconnectBackupFolder=::disconnectBackupFolder
+                )
             }
             else -> Column(contentModifier.verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(20.dp)) {
                 if (update is UpdateState.Available) AssistChip(onClick={open((update as UpdateState.Available).url)},label={Text("Update available")},leadingIcon={Icon(Icons.Default.SystemUpdate,null)})
@@ -288,7 +340,7 @@ class MainActivity : ComponentActivity() {
             Text("Timeline: add SF at each finish crossing. S2 and S3 mark the starts of sectors 2 and 3. Use track timing or video to identify crossings.")
             Text("Suggestions are estimated matches. Track sketches are references, not measured positions. Average speed needs a known lap length.")
             Text("Graphs use independent scales. Comparisons align lap time, not physical location. Pocket motion includes movement of your body.")
-            Text("Sessions: import a Pocket Pitwall ZIP backup. Details: edit notes, sketch a track or export ZIP (all data), CSV (raw sensor telemetry), or JSON (metadata).")
+            Text("Data & backups: choose a user-owned folder to keep verified session ZIPs outside app storage. Use Restore / rescan after reinstalling. Details also supports manual ZIP, CSV and JSON exports.")
         }
     },confirmButton={TextButton(onClick={help=false}) { Text("Got it") }})
     deleteTarget?.let { session -> AlertDialog(onDismissRequest={deleteTarget=null},title={Text("Delete session?")},text={Text("This removes ${session.title} and its sensor data. Export first to keep a copy.")},
@@ -296,7 +348,19 @@ class MainActivity : ComponentActivity() {
         dismissButton={TextButton(onClick={deleteTarget=null}) { Text("Cancel") }}) }
 }
 
-@Composable private fun SettingsScreen(settings: AppSettings,change: (AppSettings)->Unit,update: UpdateState,check: ()->Unit,open: (String)->Unit) {
+@Composable private fun SettingsScreen(
+    settings: AppSettings,
+    change: (AppSettings)->Unit,
+    update: UpdateState,
+    check: ()->Unit,
+    open: (String)->Unit,
+    backupFolder: String?,
+    backupBusy: Boolean,
+    chooseBackupFolder: ()->Unit,
+    backupNow: ()->Unit,
+    restoreBackups: ()->Unit,
+    disconnectBackupFolder: ()->Unit
+) {
     Text("Appearance",style=MaterialTheme.typography.titleMedium)
     Picker("Theme",listOf("System","Light","Dark"),listOf("System","Light","Dark").indexOf(settings.theme).coerceAtLeast(0)) { change(settings.copy(theme=listOf("System","Light","Dark")[it])) }
     SettingSwitch("Wallpaper colors",settings.dynamicColors,{change(settings.copy(dynamicColors=it))},Build.VERSION.SDK_INT>=31)
@@ -305,6 +369,38 @@ class MainActivity : ComponentActivity() {
     Text("Recording defaults",style=MaterialTheme.typography.titleMedium)
     OutlinedTextField(settings.defaultTrack,{change(settings.copy(defaultTrack=it.take(100)))},label={Text("Default track")},singleLine=true,modifier=Modifier.fillMaxWidth())
     SettingSwitch("Reverse direction",settings.defaultReverse,{change(settings.copy(defaultReverse=it))})
+    HorizontalDivider()
+    Text("Data & backups",style=MaterialTheme.typography.titleMedium)
+    Text(
+        if (backupFolder == null) "No backup folder selected" else "Backup folder · $backupFolder",
+        style=MaterialTheme.typography.bodyMedium
+    )
+    Text(
+        "Session backups live outside Pocket Pitwall and survive app uninstall. The private copy remains the working copy.",
+        style=MaterialTheme.typography.bodySmall
+    )
+    OutlinedButton(onClick=chooseBackupFolder,enabled=!backupBusy) {
+        Icon(Icons.Default.FolderOpen,null); Spacer(Modifier.width(8.dp))
+        Text(if (backupFolder == null) "Choose backup folder" else "Change backup folder")
+    }
+    SettingSwitch(
+        "Automatic session backups",
+        settings.autoBackups,
+        { change(settings.copy(autoBackups=it)) },
+        enabled=backupFolder != null && !backupBusy
+    )
+    Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick=backupNow,enabled=backupFolder != null && !backupBusy,modifier=Modifier.weight(1f)) {
+            Icon(Icons.Default.Backup,null); Spacer(Modifier.width(6.dp)); Text("Back up now")
+        }
+        OutlinedButton(onClick=restoreBackups,enabled=backupFolder != null && !backupBusy,modifier=Modifier.weight(1f)) {
+            Icon(Icons.Default.Restore,null); Spacer(Modifier.width(6.dp)); Text("Restore / rescan")
+        }
+    }
+    if (backupBusy) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (backupFolder != null) {
+        TextButton(onClick=disconnectBackupFolder,enabled=!backupBusy) { Text("Disconnect backup folder") }
+    }
     HorizontalDivider()
     Text("Updates",style=MaterialTheme.typography.titleMedium)
     SettingSwitch("Check automatically",settings.autoUpdates,{change(settings.copy(autoUpdates=it))})

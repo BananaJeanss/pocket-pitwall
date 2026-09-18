@@ -107,9 +107,22 @@ class RecorderService : Service(), SensorEventListener {
             if(wake?.isHeld==true) wake?.release()
         }
         session?.let { s ->
-            runCatching { store.save(s.copy(status=finalStatus,duration=((SystemClock.elapsedRealtimeNanos()-origin)/1e9).coerceIn(0.0,3600.0))) }
-                .onFailure { error.value="Could not save session metadata: ${it.message}" }
+            val finished = s.copy(status=finalStatus,duration=((SystemClock.elapsedRealtimeNanos()-origin)/1e9).coerceIn(0.0,3600.0))
+            runCatching {
+                store.save(finished)
+                val settings = AppSettings.read(this)
+                if (settings.autoBackups && settings.backupTreeUri.isNotBlank()) {
+                    BackupStore(this).backupSession(store, finished, settings.backupTreeUri)
+                }
+            }.onFailure {
+                error.value = if (store.hasSession(finished.id)) {
+                    "Session saved, but automatic backup failed: ${it.message}"
+                } else {
+                    "Could not save session metadata: ${it.message}"
+                }
+            }
         }
+
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
     override fun onDestroy() {

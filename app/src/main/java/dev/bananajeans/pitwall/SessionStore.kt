@@ -10,7 +10,9 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
+import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import kotlin.math.sqrt
 
 data class Session(
@@ -97,8 +99,38 @@ class SessionStore(context: Context) {
         }
     }
 
-    fun importZip(input: InputStream): Session {
+    fun hasSession(id: String): Boolean {
+        if (!Regex("[a-zA-Z0-9-]+").matches(id)) return false
+        return File(File(root, id), "session.json").isFile
+    }
+
+    fun writeZip(session: Session, output: OutputStream) {
+        val sensorFile = File(File(root, session.id), "sensors.csv")
+        require(sensorFile.isFile) { "Sensor data is unavailable for this session." }
+        val zip = ZipOutputStream(output)
+        fun entry(name: String, body: String) {
+            zip.putNextEntry(ZipEntry(name))
+            zip.write(body.toByteArray())
+            zip.closeEntry()
+        }
+        entry("session.json", session.json().toString(2))
+        entry("laps.csv", lapCsv(session))
+        zip.putNextEntry(ZipEntry("sensors.csv"))
+        sensorFile.inputStream().buffered().use { it.copyTo(zip) }
+        zip.closeEntry()
+        zip.finish()
+        zip.flush()
+    }
+
+    fun importZip(input: InputStream): Session =
+        requireNotNull(importZipInternal(input, preserveId=false))
+
+    fun importBackupZip(input: InputStream): Session? =
+        importZipInternal(input, preserveId=true)
+
+    private fun importZipInternal(input: InputStream, preserveId: Boolean): Session? {
         val tempSensors = File.createTempFile("pitwall-import-", ".csv", root)
+        var destinationFolder: File? = null
         try {
             var metadata: String? = null
             var hasSensors = false
@@ -124,18 +156,33 @@ class SessionStore(context: Context) {
             require(metadata != null) { "ZIP does not contain session.json." }
             require(hasSensors) { "ZIP does not contain sensors.csv." }
 
-            val id = UUID.randomUUID().toString()
-            val parsed = parseSession(JSONObject(metadata!!), id)
+            val json = JSONObject(metadata!!)
+            val originalId = json.optString("id")
+            val id = if (preserveId) {
+                require(Regex("[a-zA-Z0-9-]+").matches(originalId)) { "Backup has an invalid session id." }
+                originalId
+            } else UUID.randomUUID().toString()
+
+            if (preserveId && hasSession(id)) {
+                tempSensors.delete()
+                return null
+            }
+
+            val parsed = parseSession(json, id)
             val imported = parsed.copy(status=if (parsed.status == "recording") "interrupted" else parsed.status)
-            val destination = raw(id)
-            save(imported)
+            destinationFolder = File(root, id).apply { mkdirs() }
+            val destination = File(destinationFolder, "sensors.csv")
             if (!tempSensors.renameTo(destination)) {
-                tempSensors.inputStream().use { source -> destination.outputStream().use { source.copyTo(it) } }
+                tempSensors.inputStream().buffered().use { source ->
+                    destination.outputStream().buffered().use { source.copyTo(it) }
+                }
                 tempSensors.delete()
             }
+            save(imported)
             return imported
         } catch (e: Exception) {
             tempSensors.delete()
+            destinationFolder?.deleteRecursively()
             throw e
         }
     }
