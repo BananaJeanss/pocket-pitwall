@@ -1,28 +1,90 @@
 name: Publish signed release
+
 on:
   push:
-    tags: ['v*']
     branches: [main]
-    paths: ['.github/workflows/release.yml']
+    paths: ['app/build.gradle.kts']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing version tag, for example v0.2.0'
+        description: 'Existing version tag, for example v0.2.1'
         required: true
         type: string
+
 permissions:
   contents: read
+
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  group: release-${{ github.event.inputs.tag || github.sha }}
   cancel-in-progress: false
+
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      publish: ${{ steps.release.outputs.publish }}
+      checkout_ref: ${{ steps.release.outputs.checkout_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: release
+        name: Resolve release version
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os,re,pathlib,subprocess
+
+          build=pathlib.Path('app/build.gradle.kts').read_text()
+          version=re.search(r'versionName\s*=\s*"([^"]+)"', build)
+          if not version:
+              raise SystemExit('Could not read Android versionName.')
+          version=version.group(1)
+
+          requested=os.environ.get('REQUESTED_TAG','').strip()
+          tag=requested or f'v{version}'
+          if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
+              raise SystemExit('Use a stable vMAJOR.MINOR.PATCH tag.')
+          if tag != f'v{version}':
+              raise SystemExit('Release tag must match Android versionName.')
+
+          event=os.environ['GITHUB_EVENT_NAME']
+          if event == 'workflow_dispatch':
+              exists=subprocess.run(
+                  ['git','ls-remote','--exit-code','--tags','origin',f'refs/tags/{tag}'],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL
+              ).returncode == 0
+              if not exists:
+                  raise SystemExit(f'{tag} does not exist. Automatic releases create tags from version bumps on main.')
+              publish='true'
+              checkout_ref=tag
+          else:
+              exists=subprocess.run(
+                  ['git','ls-remote','--exit-code','--tags','origin',f'refs/tags/{tag}'],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL
+              ).returncode == 0
+              publish='false' if exists else 'true'
+              checkout_ref=os.environ['GITHUB_SHA']
+
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write(f'tag={tag}\n')
+              output.write(f'publish={publish}\n')
+              output.write(f'checkout_ref={checkout_ref}\n')
+          PY
+
   release:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       PITWALL_KEYSTORE_PATH: ${{ github.workspace }}/release-signing.jks
       PITWALL_STORE_PASSWORD: ${{ secrets.PITWALL_STORE_PASSWORD }}
       PITWALL_KEY_ALIAS: ${{ vars.PITWALL_KEY_ALIAS || secrets.PITWALL_KEY_ALIAS }}
@@ -30,46 +92,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.sha }}
-      - name: Validate version and signing configuration
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+
+      - name: Validate signing configuration
         env:
           KEYSTORE_BASE64: ${{ secrets.PITWALL_KEYSTORE_BASE64 }}
         run: |
           python3 - <<'PY'
           import os,re,pathlib,base64
+
           build=pathlib.Path('app/build.gradle.kts').read_text()
           tag=os.environ['RELEASE_TAG']
-          if os.environ.get('GITHUB_REF') == 'refs/heads/main' and os.environ.get('GITHUB_EVENT_NAME') == 'push':
-              tag='v'+re.search(r'versionName\s*=\s*"([^"]+)"',build).group(1)
-              with open(os.environ['GITHUB_ENV'],'a') as output:
-                  output.write(f'RELEASE_TAG={tag}\n')
-          if not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',tag):
-              raise SystemExit('Use a stable vMAJOR.MINOR.PATCH tag.')
-          build=pathlib.Path('app/build.gradle.kts').read_text()
           if f'versionName = "{tag[1:]}"' not in build:
-              raise SystemExit('Tag must match Android versionName.')
+              raise SystemExit('Release tag must match Android versionName.')
+
           required=['KEYSTORE_BASE64','PITWALL_STORE_PASSWORD','PITWALL_KEY_ALIAS','PITWALL_KEY_PASSWORD']
           missing=[key for key in required if not os.environ.get(key)]
           if missing:
-              raise SystemExit('Missing signing configuration names: '+', '.join(missing)+'. Environment-scoped secrets also require the job to select that GitHub environment.')
+              raise SystemExit('Missing signing configuration names: '+', '.join(missing))
+
           key=pathlib.Path(os.environ['PITWALL_KEYSTORE_PATH'])
           key.write_bytes(base64.b64decode(''.join(os.environ['KEYSTORE_BASE64'].split()),validate=True))
           key.chmod(0o600)
           PY
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
       - name: Test, lint and build signed APK
         run: gradle --no-daemon :core:check :app:lintRelease :app:assembleRelease
+
       - name: Verify signing and stage assets
         run: |
           mkdir -p release-assets
@@ -77,16 +142,27 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "release-assets/pocket-pitwall-${RELEASE_TAG}.apk"
           cd release-assets
           sha256sum *.apk > SHA256SUMS.txt
+
       - uses: actions/upload-artifact@v4
         with:
           name: signed-release-apk
           path: release-assets/
           if-no-files-found: error
-      - name: Publish release
-        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+
+      - name: Create version tag
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/${RELEASE_TAG}" \
+            -f sha="${{ github.sha }}"
+
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --title "Pocket Pitwall $RELEASE_TAG" --generate-notes
+
       - name: Remove signing material
         if: always()
         run: rm -f "$PITWALL_KEYSTORE_PATH"
