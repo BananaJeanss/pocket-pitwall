@@ -25,6 +25,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       publish: ${{ steps.release.outputs.publish }}
       checkout_ref: ${{ steps.release.outputs.checkout_ref }}
+      create_tag: ${{ steps.release.outputs.create_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,29 +52,26 @@ jobs:
               raise SystemExit('Release tag must match Android versionName.')
 
           event=os.environ['GITHUB_EVENT_NAME']
+          exists=subprocess.run(
+              ['git','ls-remote','--exit-code','--tags','origin',f'refs/tags/{tag}'],
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL
+          ).returncode == 0
+
           if event == 'workflow_dispatch':
-              exists=subprocess.run(
-                  ['git','ls-remote','--exit-code','--tags','origin',f'refs/tags/{tag}'],
-                  stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL
-              ).returncode == 0
-              if not exists:
-                  raise SystemExit(f'{tag} does not exist. Automatic releases create tags from version bumps on main.')
               publish='true'
-              checkout_ref=tag
+              checkout_ref=tag if exists else os.environ['GITHUB_SHA']
+              create_tag='false' if exists else 'true'
           else:
-              exists=subprocess.run(
-                  ['git','ls-remote','--exit-code','--tags','origin',f'refs/tags/{tag}'],
-                  stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL
-              ).returncode == 0
               publish='false' if exists else 'true'
               checkout_ref=os.environ['GITHUB_SHA']
+              create_tag='false' if exists else 'true'
 
           with open(os.environ['GITHUB_OUTPUT'],'a') as output:
               output.write(f'tag={tag}\n')
               output.write(f'publish={publish}\n')
               output.write(f'checkout_ref={checkout_ref}\n')
+              output.write(f'create_tag={create_tag}\n')
           PY
 
   release:
@@ -150,7 +148,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create version tag
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.create_tag == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
