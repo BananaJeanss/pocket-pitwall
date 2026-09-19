@@ -217,7 +217,8 @@ object WatchLink {
                 }
                 attempt++
                 if (attempt < maxAttempts) {
-                    val delay = baseDelayMs * (1L shl (attempt - 1)).coerceAtMost(10_000) // cap at 10s
+                    // Cap the FINAL delay at 10s, not just the multiplier
+                    val delay = (baseDelayMs * (1L shl (attempt - 1))).coerceAtMost(10_000)
                     kotlinx.coroutines.delay(delay)
                 }
             }

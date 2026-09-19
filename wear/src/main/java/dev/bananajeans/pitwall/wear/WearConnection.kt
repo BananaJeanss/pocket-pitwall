@@ -10,6 +10,8 @@ import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.ClockSync
 import dev.bananajeans.pitwall.protocol.Messages
 import dev.bananajeans.pitwall.protocol.WatchSessionControl
+import dev.bananajeans.pitwall.protocol.StartResult
+import dev.bananajeans.pitwall.protocol.StopResult
 import dev.bananajeans.pitwall.wear.RecorderService
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
@@ -136,19 +138,41 @@ class WearConnection(private val context: Context) {
     }
 
     private fun onStart(message: Messages.Start) {
-        if (!watchControl.shouldStart(message.sessionId, message.startSeq)) {
-            send(Messages.StartAck(message.sessionId, true, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+        // Check if this is a new start command or a duplicate/retry
+        val isNew = watchControl.shouldStart(message.sessionId, message.startSeq)
+        
+        if (!isNew) {
+            // Duplicate: replay the actual cached result if available
+            val result = watchControl.getStartResult(message.sessionId, message.startSeq)
+            if (result != null) {
+                send(Messages.StartAck(message.sessionId, result.recording, result.appVersion, result.protocolVersion))
+            } else if (watchControl.isStartInProgress(message.sessionId, message.startSeq)) {
+                // Original start is still in progress - don't ACK yet, phone will retry
+                // The callback will send the ACK when it completes
+            } else {
+                // Shouldn't happen: seq <= previous but no result cached
+                // Fall back to sending a failure ack to unblock phone
+                send(Messages.StartAck(message.sessionId, false, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+            }
             return
         }
+
+        // New start sequence - launch recorder and wait for callback
         val intent = android.content.Intent(context, RecorderService::class.java)
             .setAction(RecorderService.ACTION_START)
             .putExtra(RecorderService.EXTRA_SESSION_ID, message.sessionId)
             .putExtra(RecorderService.EXTRA_TITLE, message.title)
             .putExtra(RecorderService.EXTRA_DIRECTION, message.direction)
-        // The recorder posts sensor registration and log open to its handler thread.
-        // We need to wait for it to confirm "recording=true" before ACKing.
+        
         val ackCallback = object : RecorderService.Companion.RecordingCallback {
             override fun onRecordingStarted(success: Boolean) {
+                watchControl.onStartCompleted(
+                    message.sessionId, 
+                    message.startSeq, 
+                    success, 
+                    BuildConfig.VERSION_NAME, 
+                    Messages.PROTOCOL_VERSION
+                )
                 send(Messages.StartAck(message.sessionId, success, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
             }
         }
@@ -157,26 +181,40 @@ class WearConnection(private val context: Context) {
             context.startForegroundService(intent)
         } catch (e: Exception) {
             RecorderService.clearRecordingCallback(message.sessionId)
+            watchControl.onStartCompleted(
+                message.sessionId,
+                message.startSeq,
+                false,
+                BuildConfig.VERSION_NAME,
+                Messages.PROTOCOL_VERSION
+            )
             send(Messages.StartAck(message.sessionId, false, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
         }
     }
 
     private fun onStop(message: Messages.Stop) {
-        // shouldStop returns true only for NEW sequences (higher than any seen).
-        // If false, it means this is a duplicate of an already-handled sequence.
-        if (!watchControl.shouldStop(message.sessionId, message.stopSeq)) {
-            // This is a duplicate/retried stop. If the original is still finalizing,
-            // we don't ACK yet - the original callback will ACK when finalization completes.
-            // If the original already completed, we'd need to track the result to re-ack.
-            // For now, we just don't ACK here - the phone will retry and eventually
-            // get the correct ACK from the original callback.
+        val isNew = watchControl.shouldStop(message.sessionId, message.stopSeq)
+
+        if (!isNew) {
+            // Duplicate: replay the actual cached result if available
+            val result = watchControl.getStopResult(message.sessionId, message.stopSeq)
+            if (result != null) {
+                send(Messages.StopAck(message.sessionId, result.finalized, message.sessionId, Messages.PROTOCOL_VERSION))
+            } else if (watchControl.isStopInProgress(message.sessionId, message.stopSeq)) {
+                // Original stop is still in progress - don't ACK yet, phone will retry
+            } else {
+                // Shouldn't happen: seq <= previous but no result cached
+                send(Messages.StopAck(message.sessionId, false, message.sessionId, Messages.PROTOCOL_VERSION))
+            }
             return
         }
-        // New stop sequence - start finalization and wait for callback.
+
+        // New stop sequence - start finalization and wait for callback
         stopInProgress.add(message.sessionId)
         val ackCallback = object : RecorderService.Companion.StopCallback {
             override fun onStopped(finalized: Boolean) {
                 stopInProgress.remove(message.sessionId)
+                watchControl.onStopCompleted(message.sessionId, message.stopSeq, finalized)
                 send(Messages.StopAck(message.sessionId, finalized, message.sessionId, Messages.PROTOCOL_VERSION))
             }
         }

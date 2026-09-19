@@ -6,6 +6,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 class SessionControlTest {
 
@@ -147,5 +148,116 @@ class SessionControlTest {
         val retry = control.stopMessage()
         assertNotNull(retry)
         assertEquals(1, retry!!.stopSeq)
+    }
+
+    @Test
+    fun watchControlCachesAndReplaysStartResult() {
+        val watch = WatchSessionControl()
+        // First execution
+        assertTrue(watch.shouldStart("s1", 1))
+        // Simulate completion
+        watch.onStartCompleted("s1", 1, true, "1.0", 1)
+        // Duplicate should return cached result
+        val result = watch.getStartResult("s1", 1)
+        assertNotNull(result)
+        assertTrue(result.recording)
+        // Second duplicate call
+        assertTrue(!watch.shouldStart("s1", 1))
+        val result2 = watch.getStartResult("s1", 1)
+        assertNotNull(result2)
+        assertTrue(result2.recording)
+    }
+
+    @Test
+    fun watchControlCachesAndReplaysStartFailure() {
+        val watch = WatchSessionControl()
+        assertTrue(watch.shouldStart("s1", 1))
+        watch.onStartCompleted("s1", 1, false, "1.0", 1)
+        val result = watch.getStartResult("s1", 1)
+        assertNotNull(result)
+        assertFalse(result.recording)
+        // Duplicate should replay failure
+        assertTrue(!watch.shouldStart("s1", 1))
+        val result2 = watch.getStartResult("s1", 1)
+        assertNotNull(result2)
+        assertFalse(result2.recording)
+    }
+
+    @Test
+    fun watchControlCachesAndReplaysStopResult() {
+        val watch = WatchSessionControl()
+        assertTrue(watch.shouldStop("s1", 1))
+        watch.onStopCompleted("s1", 1, true)
+        val result = watch.getStopResult("s1", 1)
+        assertNotNull(result)
+        assertTrue(result.finalized)
+        // Duplicate should replay success
+        assertTrue(!watch.shouldStop("s1", 1))
+        val result2 = watch.getStopResult("s1", 1)
+        assertNotNull(result2)
+        assertTrue(result2.finalized)
+    }
+
+    @Test
+    fun watchControlReplaysStopFailure() {
+        val watch = WatchSessionControl()
+        assertTrue(watch.shouldStop("s1", 1))
+        watch.onStopCompleted("s1", 1, false)
+        val result = watch.getStopResult("s1", 1)
+        assertNotNull(result)
+        assertFalse(result.finalized)
+        // Duplicate should replay failure
+        assertTrue(!watch.shouldStop("s1", 1))
+        val result2 = watch.getStopResult("s1", 1)
+        assertNotNull(result2)
+        assertFalse(result2.finalized)
+    }
+
+    @Test
+    fun watchControlDoesNotAckWhileInProgress() {
+        val watch = WatchSessionControl()
+        assertTrue(watch.shouldStart("s1", 1))
+        // Not completed yet
+        assertTrue(watch.isStartInProgress("s1", 1))
+        assertNull(watch.getStartResult("s1", 1))
+        // Completion
+        watch.onStartCompleted("s1", 1, true, "1.0", 1)
+        assertFalse(watch.isStartInProgress("s1", 1))
+        assertNotNull(watch.getStartResult("s1", 1))
+    }
+
+    @Test
+    fun watchControlDoesNotAckStopWhileInProgress() {
+        val watch = WatchSessionControl()
+        assertTrue(watch.shouldStop("s1", 1))
+        // Not completed yet
+        assertTrue(watch.isStopInProgress("s1", 1))
+        assertNull(watch.getStopResult("s1", 1))
+        // Completion
+        watch.onStopCompleted("s1", 1, true)
+        assertFalse(watch.isStopInProgress("s1", 1))
+        assertNotNull(watch.getStopResult("s1", 1))
+    }
+
+    @Test
+    fun watchControlMaxSeqPreventsRollback() {
+        val watch = WatchSessionControl()
+        // Handle seq=2 first
+        assertTrue(watch.shouldStart("s1", 2))
+        // Delayed seq=1 arrives - should be suppressed, max stays 2
+        assertTrue(!watch.shouldStart("s1", 1))
+        // Duplicate seq=2 - suppressed
+        assertTrue(!watch.shouldStart("s1", 2))
+        // New higher seq=3 - executes
+        assertTrue(watch.shouldStart("s1", 3))
+    }
+
+    @Test
+    fun watchControlStopMaxSeqPreventsRollback() {
+        val watch = WatchSessionControl()
+        assertTrue(watch.shouldStop("s1", 2))
+        assertTrue(!watch.shouldStop("s1", 1))
+        assertTrue(!watch.shouldStop("s1", 2))
+        assertTrue(watch.shouldStop("s1", 3))
     }
 }

@@ -1,5 +1,7 @@
 package dev.bananajeans.pitwall.protocol
 
+import java.util.LinkedHashMap
+
 /**
  * Pure state machine for phone-side session control over an unreliable
  * channel (issue #19). Encapsulates the idempotency/retry rules so they can
@@ -138,40 +140,123 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
 }
 
 /**
- * Watch-side duplicate suppression (issue #19): "Make duplicate/retried
- * control messages idempotent." The watch must start/stop the recorder at
- * most once per (sessionId, seq), and re-ack duplicates.
+ * Result of a start command for duplicate replay.
+ */
+data class StartResult(
+    val recording: Boolean,
+    val appVersion: String,
+    val protocolVersion: Int
+)
+
+/**
+ * Result of a stop command for duplicate replay.
+ */
+data class StopResult(
+    val finalized: Boolean
+)
+
+/**
+ * Watch-side duplicate suppression with result caching (issue #19):
+ * "Make duplicate/retried control messages idempotent."
+ * The watch must start/stop the recorder at most once per (sessionId, seq),
+ * and re-ack duplicates with the ACTUAL result from the first execution.
+ *
+ * For each (sid, seq) pair we track:
+ * - Whether we've seen this sequence (max seq seen per sid)
+ * - If executed: the actual result (recording/finalized)
+ * - If in progress: we haven't completed yet, so we wait for the callback
  */
 class WatchSessionControl {
 
     private val handledStarts = LinkedHashMap<String, Long>() // sid -> max seq seen
     private val handledStops = LinkedHashMap<String, Long>()
 
+    // Cache of actual results for completed (sid, seq) pairs for replay
+    private val startResults = mutableMapOf<String, StartResult>() // "sid#seq" -> result
+    private val stopResults = mutableMapOf<String, StopResult>()
+
+    // Track in-progress sequences that haven't produced a result yet
+    private val startInProgress = mutableSetOf<String>() // "sid#seq"
+    private val stopInProgress = mutableSetOf<String>()
+
     /**
      * Returns true when this start is new for the session (must start the
-     * recorder); false when it is a retry (only re-ack).
+     * recorder); false when it is a retry (only re-ack with cached result).
      */
     fun shouldStart(sid: String, seq: Long): Boolean {
+        val key = "$sid#$seq"
         val previous = handledStarts[sid] ?: Long.MIN_VALUE
         if (seq <= previous) {
-            // Duplicate or reordered old packet - don't re-execute, just re-ack
+            // Duplicate or reordered old packet - don't re-execute
             return false
         }
         handledStarts[sid] = maxOf(previous, seq)
+        startInProgress.add(key)
         trim(handledStarts)
         return true
     }
 
-    /** Same for stops. */
+    /**
+     * Called when the recorder has actually completed startup (success or failure).
+     * Caches the result for duplicate replay.
+     */
+    fun onStartCompleted(sid: String, seq: Long, recording: Boolean, appVersion: String, protocolVersion: Int) {
+        val key = "$sid#$seq"
+        startInProgress.remove(key)
+        startResults[key] = StartResult(recording, appVersion, protocolVersion)
+    }
+
+    /**
+     * Gets the cached start result for a duplicate, or null if not completed yet.
+     */
+    fun getStartResult(sid: String, seq: Long): StartResult? {
+        val key = "$sid#$seq"
+        return startResults[key]
+    }
+
+    /**
+     * Returns true when this stop is new for the session (must stop the
+     * recorder); false when it is a retry (only re-ack with cached result).
+     */
     fun shouldStop(sid: String, seq: Long): Boolean {
+        val key = "$sid#$seq"
         val previous = handledStops[sid] ?: Long.MIN_VALUE
         if (seq <= previous) {
-            // Duplicate or reordered old packet - don't re-execute, just re-ack
+            // Duplicate or reordered old packet - don't re-execute
             return false
         }
         handledStops[sid] = maxOf(previous, seq)
+        stopInProgress.add(key)
         trim(handledStops)
         return true
+    }
+
+    /**
+     * Called when the recorder has actually completed finalization.
+     * Caches the result for duplicate replay.
+     */
+    fun onStopCompleted(sid: String, seq: Long, finalized: Boolean) {
+        val key = "$sid#$seq"
+        stopInProgress.remove(key)
+        stopResults[key] = StopResult(finalized)
+    }
+
+    /**
+     * Gets the cached stop result for a duplicate, or null if not completed yet.
+     */
+    fun getStopResult(sid: String, seq: Long): StopResult? {
+        val key = "$sid#$seq"
+        return stopResults[key]
+    }
+
+    /** True if a stop is still in progress for this (sid, seq). */
+    fun isStopInProgress(sid: String, seq: Long): Boolean {
+        return stopInProgress.contains("$sid#$seq")
+    }
+
+    /** True if a start is still in progress for this (sid, seq). */
+    fun isStartInProgress(sid: String, seq: Long): Boolean {
+        return startInProgress.contains("$sid#$seq")
     }
 
     private fun trim(map: LinkedHashMap<String, Long>) {
