@@ -224,6 +224,21 @@ class WatchTransferManager(private val context: Context) {
             )
             store.save(session.copy(watch = info))
             SessionRepository.refresh()
+            // Push the compact summary back to the watch (issue #25).
+            WatchLink.sendResult(
+                Messages.Result(
+                    sessionId = sessionId,
+                    bestLapSeconds = dev.bananajeans.pitwall.core.Telemetry.laps(session.marks)
+                        .minByOrNull { it.duration() }?.duration()?.takeIf { it.isFinite() },
+                    lapCount = dev.bananajeans.pitwall.core.Telemetry.laps(session.marks).size,
+                    steeringSmoothness = info.metrics?.steeringSmoothness,
+                    correctionCount = info.metrics?.correctionCount,
+                    peakHr = result.log.heartRate.maxOfOrNull { it.bpm },
+                    averageHr = result.log.heartRate.map { it.bpm }.takeIf { it.isNotEmpty() }?.average()?.toInt(),
+                    watchDataQuality = info.metrics?.quality,
+                    notes = if (result.log.complete) null else "Watch log incomplete"
+                )
+            )
         } catch (_: Exception) {
             // Session attachment is best-effort; the raw log remains stored.
         }

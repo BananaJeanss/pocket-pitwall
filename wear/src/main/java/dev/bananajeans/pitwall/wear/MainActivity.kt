@@ -1,8 +1,8 @@
 package dev.bananajeans.pitwall.wear
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -35,11 +35,18 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Watch app entry point. Deliberately glanceable:
- *  - recording status (large, unmistakable)
- *  - pending transfer counts
- *  - sensor diagnostics summary (scroll)
- *  - a manual test-record control for bench validation without the phone
+ * Watch app entry point (issue #25).
+ *
+ * State machine, glanceable-first:
+ *   Ready -> Recording -> Saved/Transferring -> Results
+ *
+ * Rules:
+ *  - Recording status is unmistakable (large REC), trustworthy with the
+ *    screen off (foreground service + wake lock do the real work).
+ *  - Phone disconnection is NOT an error while local logging is healthy:
+ *    the UI shows a quiet "phone away" note, never a failure.
+ *  - Results come from the phone's canonical analysis; the watch never
+ *    derives conflicting numbers.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,23 +72,33 @@ private fun WatchApp() {
     var status by remember { mutableStateOf(RecorderService.status) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf(-1) }
+    var connection by remember {
+        mutableStateOf((context.applicationContext as PitwallWatchApplication).connection.connectionState)
+    }
+    var results by remember { mutableStateOf(WatchResultsStore.list(context)) }
+    var showResult by remember { mutableStateOf(false) }
 
-    // Poll recorder status while the screen is on (watch UIs must stay cheap).
+    // Cheap polling keeps the small UI honest without recomposition storms.
     DisposableEffect(Unit) {
+        val app = context.applicationContext as PitwallWatchApplication
         val thread = Thread {
             while (!Thread.currentThread().isInterrupted) {
                 status = RecorderService.status
+                connection = app.connection.connectionState
                 try { Thread.sleep(500) } catch (_: InterruptedException) { break }
             }
         }.apply { isDaemon = true; start() }
         onDispose { thread.interrupt() }
     }
 
-    // Refresh pending-transfer count when not recording (cheap, on demand).
     if (pending < 0 || !status.recording) {
         val store = remember { WatchLogStore(context) }
         val count = remember(status.recording) { store.pendingTransfer().size }
         if (count != pending) pending = count
+    }
+    // Refresh results when not recording (cheap; disk-backed).
+    if (!status.recording && results.isEmpty()) {
+        results = WatchResultsStore.list(context)
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -94,20 +111,17 @@ private fun WatchApp() {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            status.error?.let { message ->
-                Text(
-                    text = message,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center
-                )
-            }
-            if (status.recording) {
-                RecordingPanel(status)
-            } else {
-                IdlePanel(
+            when {
+                status.recording -> RecordingPanel(status, connection.phoneConnected)
+                showResult && results.isNotEmpty() -> ResultPanel(results.first(), onDone = { showResult = false })
+                else -> IdlePanel(
+                    context = context,
                     pending = pending.coerceAtLeast(0),
+                    phoneConnected = connection.phoneConnected,
                     showDiagnostics = showDiagnostics,
+                    resultsAvailable = results.isNotEmpty(),
                     onToggleDiagnostics = { showDiagnostics = !showDiagnostics },
+                    onShowResults = { showResult = true },
                     onStartTest = { startTestRecording(context) },
                     onStopTest = { stopTestRecording(context) }
                 )
@@ -118,7 +132,7 @@ private fun WatchApp() {
 }
 
 @Composable
-private fun RecordingPanel(status: RecorderStatus) {
+private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean) {
     Text(
         text = "REC",
         color = Color(0xFFFF5252),
@@ -135,18 +149,28 @@ private fun RecordingPanel(status: RecorderStatus) {
         color = if (status.healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
+    // Phone loss is NOT a failure while local logging is healthy (issue #25).
     Text(
-        text = "Screen can turn off",
+        text = when {
+            status.healthy && phoneConnected -> "phone connected"
+            status.healthy -> "phone away · logging safely on watch"
+            else -> "check watch storage"
+        },
         style = MaterialTheme.typography.labelSmall,
+        color = if (status.healthy) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
 }
 
 @Composable
 private fun IdlePanel(
+    context: Context,
     pending: Int,
+    phoneConnected: Boolean,
     showDiagnostics: Boolean,
+    resultsAvailable: Boolean,
     onToggleDiagnostics: () -> Unit,
+    onShowResults: () -> Unit,
     onStartTest: () -> Unit,
     onStopTest: () -> Unit
 ) {
@@ -155,16 +179,55 @@ private fun IdlePanel(
         style = MaterialTheme.typography.titleLarge,
         textAlign = TextAlign.Center
     )
-    Text(
-        text = if (pending == 0) "Ready"
-        else "$pending saved ${if (pending == 1) "log" else "logs"} waiting for phone",
-        textAlign = TextAlign.Center,
-        color = MaterialTheme.colorScheme.primary
-    )
+    when {
+        pending > 0 -> Text(
+            "$pending saved ${if (pending == 1) "log" else "logs"} waiting for phone",
+            color = MaterialTheme.colorScheme.primary,
+            textAlign = TextAlign.Center
+        )
+        resultsAvailable -> Button(onClick = onShowResults) { Text("Last result") }
+        else -> Text(
+            if (phoneConnected) "Ready · phone connected" else "Ready (phone optional)",
+            color = MaterialTheme.colorScheme.primary,
+            textAlign = TextAlign.Center
+        )
+    }
     Button(onClick = onStartTest) { Text("Test record") }
     Button(onClick = onToggleDiagnostics) {
         Text(if (showDiagnostics) "Hide sensors" else "Sensors")
     }
+}
+
+@Composable
+private fun ResultPanel(result: dev.bananajeans.pitwall.protocol.Messages.Result, onDone: () -> Unit) {
+    Text(
+        text = "Session results",
+        style = MaterialTheme.typography.titleMedium,
+        textAlign = TextAlign.Center
+    )
+    result.bestLapSeconds?.let {
+        Text("Best lap ${formatSeconds(it)}", color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center)
+    }
+    Text("${result.lapCount} ${if (result.lapCount == 1) "lap" else "laps"}", textAlign = TextAlign.Center)
+    result.steeringSmoothness?.let {
+        Text("Steering smoothness ${"%d%%".format((it * 100).toInt().coerceIn(0, 100))}", textAlign = TextAlign.Center)
+    }
+    result.correctionCount?.let { Text("$it corrections", textAlign = TextAlign.Center) }
+    if (result.peakHr != null || result.averageHr != null) {
+        Text(
+            "HR peak ${result.peakHr ?: "—"} · avg ${result.averageHr ?: "—"}",
+            textAlign = TextAlign.Center
+        )
+    }
+    result.watchDataQuality?.takeIf { it != "ok" }?.let {
+        Text(
+            "Watch data: $it",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.Center
+        )
+    }
+    Button(onClick = onDone) { Text("Done") }
 }
 
 @Composable
@@ -206,3 +269,6 @@ private fun formatElapsed(seconds: Double): String {
     val total = seconds.toLong()
     return String.format(Locale.US, "%02d:%02d", total / 60, total % 60)
 }
+
+private fun formatSeconds(seconds: Double): String =
+    String.format(Locale.US, "%.2f", seconds)
