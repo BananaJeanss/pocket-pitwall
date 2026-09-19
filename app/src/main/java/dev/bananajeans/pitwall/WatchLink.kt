@@ -14,6 +14,8 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 /**
@@ -152,7 +154,9 @@ object WatchLink {
     fun onPhoneSessionStarted(sessionId: String, title: String, direction: String) {
         try {
             val message = synchronized(control) { control.start(sessionId, title, direction) }
-            if (message != null) send(message)
+            if (message != null) {
+                sendWithRetry(message, maxAttempts = 3, baseDelayMs = 500)
+            }
             publishControl()
         } catch (_: IllegalStateException) {
             // Previous session still winding down; the watch state machine
@@ -172,10 +176,52 @@ object WatchLink {
     fun onPhoneSessionStopped(sessionId: String) {
         try {
             val message = synchronized(control) { control.stop() }
-            if (message != null) send(message)
+            if (message != null) {
+                sendWithRetry(message, maxAttempts = 3, baseDelayMs = 500)
+            }
             publishControl()
         } catch (_: Exception) {
         }
+    }
+
+    /**
+     * Sends a message with exponential backoff retry. For control messages
+     * (Start/Stop) where the watch's idempotent state machine handles duplicates,
+     * we can safely retry on send failure without side effects.
+     */
+    private fun sendWithRetry(message: Messages.Message, maxAttempts: Int = 3, baseDelayMs: Long = 500) {
+        scope.launch {
+            var attempt = 0
+            while (attempt < maxAttempts) {
+                val success = sendBlocking(message)
+                if (success) return@launch
+                attempt++
+                if (attempt < maxAttempts) {
+                    val delay = baseDelayMs * (1L shl (attempt - 1)) // 500, 1000, 2000...
+                    kotlinx.coroutines.delay(delay)
+                }
+            }
+            // All attempts failed; state machine will show PENDING_* and publishControl()
+            // will surface the pendingAgeMillis for UI/retry awareness.
+        }
+    }
+
+    /** Blocking send that returns true if the message was accepted for delivery. */
+    private suspend fun sendBlocking(message: Messages.Message): Boolean = coroutineScope {
+        val bytes = Messages.encode(message)
+        val nodesTask = nodeClient.connectedNodes
+        val nodes = nodesTask.await()
+            .filter { (it as com.google.android.gms.wearable.Node).isNearby }
+        val node = nodes.firstOrNull()
+            ?.also { node ->
+                try {
+                    messageClient.sendMessage(node.id, Messages.PATH, bytes).await()
+                    return@coroutineScope true
+                } catch (_: Exception) {
+                    state.set(state.get().copy(watchConnected = false))
+                }
+            }
+        false
     }
 
     /**

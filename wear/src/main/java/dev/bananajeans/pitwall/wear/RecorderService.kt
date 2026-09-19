@@ -62,6 +62,48 @@ class RecorderService : Service(), SensorEventListener {
         private fun update(block: (RecorderStatus) -> RecorderStatus) {
             statusRef.updateAndGet { block(it) }
         }
+
+        /** Callback for WearConnection to wait for real recording start. */
+        interface RecordingCallback {
+            fun onRecordingStarted(success: Boolean)
+        }
+
+        private val recordingCallbacks = mutableMapOf<String, RecordingCallback>()
+        private val callbacksLock = Any()
+
+        fun setRecordingCallback(sid: String, cb: RecordingCallback) {
+            synchronized(callbacksLock) { recordingCallbacks[sid] = cb }
+        }
+
+        fun clearRecordingCallback(sid: String) {
+            synchronized(callbacksLock) { recordingCallbacks.remove(sid) }
+        }
+
+        fun triggerRecordingCallback(sid: String, success: Boolean) {
+            val cb = synchronized(callbacksLock) { recordingCallbacks.remove(sid) }
+            cb?.onRecordingStarted(success)
+        }
+
+        /** Callback for WearConnection to wait for real stop finalization. */
+        interface StopCallback {
+            fun onStopped(finalized: Boolean)
+        }
+
+        private val stopCallbacks = mutableMapOf<String, StopCallback>()
+        private val stopCallbacksLock = Any()
+
+        fun setStopCallback(sid: String, cb: StopCallback) {
+            synchronized(stopCallbacksLock) { stopCallbacks[sid] = cb }
+        }
+
+        fun clearStopCallback(sid: String) {
+            synchronized(stopCallbacksLock) { stopCallbacks.remove(sid) }
+        }
+
+        fun triggerStopCallback(sid: String, finalized: Boolean) {
+            val cb = synchronized(stopCallbacksLock) { stopCallbacks.remove(sid) }
+            cb?.onStopped(finalized)
+        }
     }
 
     private lateinit var manager: SensorManager
@@ -154,6 +196,8 @@ class RecorderService : Service(), SensorEventListener {
             require(registeredAccel && registeredGyro) { "Required IMU sensors (accelerometer and gyroscope) failed to register" }
 
             update { it.copy(sessionId = sessionId, recording = true, healthy = true, samples = 0, elapsedSeconds = 0.0, error = null) }
+            // Signal that real recording has started; WearConnection will ACK the phone.
+            triggerRecordingCallback(sessionId, true)
 
             handler.postDelayed({
                 handler.postDelayed(this::tick, 1000)
@@ -272,7 +316,11 @@ class RecorderService : Service(), SensorEventListener {
             writer = null
             if (wake?.isHeld == true) wake?.release()
         }
-        sessionId?.let { store.markFinalized(it, finalizedOk) }
+        sessionId?.let {
+            store.markFinalized(it, finalizedOk)
+            // Signal that real stop/finalization completed; WearConnection will ACK the phone.
+            triggerStopCallback(it, finalizedOk)
+        }
         update { it.copy(recording = false, healthy = false) }
         Handler(Looper.getMainLooper()).post {
             if (Build.VERSION.SDK_INT >= 33) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
