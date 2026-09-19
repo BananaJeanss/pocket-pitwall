@@ -58,6 +58,7 @@ dependencies {
     implementation("androidx.wear.compose:compose-foundation:1.5.4")
     implementation("androidx.wear.compose:compose-ui-tooling:1.5.4")
     implementation("com.google.android.gms:play-services-wearable:19.0.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
