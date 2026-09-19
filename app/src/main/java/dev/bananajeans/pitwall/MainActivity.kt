@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SessionRepository.initialize(applicationContext)
+        WatchLink.initialize(applicationContext)
         setContent {
             var settings by remember { mutableStateOf(AppSettings.read(this)) }
             val dark = when (settings.theme) { "Dark" -> true; "Light" -> false; else -> isSystemInDarkTheme() }
@@ -322,6 +323,7 @@ class MainActivity : ComponentActivity() {
                         FilterChip(!reverse,{reverse=false},label={Text("Normal")}); FilterChip(reverse,{reverse=true},label={Text("Reverse")})
                     }
                 }
+                WatchStatusLine(active)
                 Button(onClick={
                     if (active) context.startService(Intent(context,RecorderService::class.java).setAction(RecorderService.STOP))
                     else if (Build.VERSION.SDK_INT>=33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -424,5 +426,35 @@ class MainActivity : ComponentActivity() {
 @Composable private fun SettingSwitch(label: String,value: Boolean,change: (Boolean)->Unit,enabled: Boolean=true) {
     Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
         Text(label,Modifier.weight(1f)); Switch(checked=value,onCheckedChange=change,enabled=enabled,modifier=Modifier.semantics { contentDescription=label })
+    }
+}
+
+/** One-line watch availability indicator; absent/invisible when no watch exists. */
+@Composable private fun WatchStatusLine(recording: Boolean) {
+    var state by remember { mutableStateOf(WatchLink.currentState) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            state = WatchLink.currentState
+            kotlinx.coroutines.delay(2000)
+        }
+    }
+    if (!state.watchConnected) {
+        Text(
+            "No watch connected · phone-only recording works normally",
+            style=MaterialTheme.typography.labelSmall,
+            color=MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    } else {
+        val label = when {
+            recording && state.control.state == dev.bananajeans.pitwall.protocol.SessionControl.CommandState.RECORDING -> "Watch recording"
+            recording -> "Watch starting…"
+            state.control.state == dev.bananajeans.pitwall.protocol.SessionControl.CommandState.STOPPED -> "Watch log saved"
+            else -> "Watch connected · will record with sessions"
+        }
+        Text(
+            label,
+            style=MaterialTheme.typography.labelSmall,
+            color=MaterialTheme.colorScheme.primary
+        )
     }
 }

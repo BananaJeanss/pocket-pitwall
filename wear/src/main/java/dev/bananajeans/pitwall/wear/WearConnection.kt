@@ -1,0 +1,175 @@
+package dev.bananajeans.pitwall.wear
+
+import android.content.Context
+import android.os.SystemClock
+import com.google.android.gms.wearable.MessageClient
+import com.google.android.gms.wearable.MessageEvent
+import com.google.android.gms.wearable.Node
+import com.google.android.gms.wearable.NodeClient
+import com.google.android.gms.wearable.Wearable
+import dev.bananajeans.pitwall.protocol.ClockSync
+import dev.bananajeans.pitwall.protocol.Messages
+import dev.bananajeans.pitwall.protocol.WatchSessionControl
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+
+/**
+ * Wear Data Layer plumbing for the watch (issues #19/#20).
+ *
+ * Owns:
+ *  - phone-node discovery + connection state for the UI,
+ *  - control-message decode/dispatch to the recorder,
+ *  - syncPing/syncPong round trips feeding [ClockSync].
+ *
+ * The watch recorder itself never touches this class: losing the phone
+ * mid-session only degrades coordination, never logging.
+ */
+class WearConnection(private val context: Context) {
+
+    data class ConnectionState(
+        val phoneConnected: Boolean = false,
+        val phoneName: String? = null,
+        val lastSyncFit: ClockSync.Fit? = null
+    )
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val messageClient: MessageClient = Wearable.getMessageClient(context)
+    private val nodeClient: NodeClient = Wearable.getNodeClient(context)
+
+    private val state = AtomicReference(ConnectionState())
+    val connectionState: ConnectionState get() = state.get()
+
+    /** Fires when the connection state changes (for the UI). */
+    @Volatile var listener: (() -> Unit)? = null
+
+    private val watchControl = WatchSessionControl()
+    private val exchanges = ArrayList<ClockSync.Exchange>()
+    private val sid = "clock-sync"
+
+    private val messageListener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
+        handleMessage(event)
+    }
+
+    fun start() {
+        messageClient.addListener(messageListener)
+        refreshNodes()
+        scope.launch {
+            while (true) {
+                refreshNodes()
+                kotlinx.coroutines.delay(10_000)
+            }
+        }
+    }
+
+    fun stop() {
+        messageClient.removeListener(messageListener)
+        scope.cancel()
+    }
+
+    private fun refreshNodes() {
+        nodeClient.connectedNodes.addOnSuccessListener { nodes: List<Node> ->
+            val phone = nodes.firstOrNull()
+            val connected = phone != null
+            val changed = connected != state.get().phoneConnected || phone?.displayName != state.get().phoneName
+            state.set(ConnectionState(connected, phone?.displayName, state.get().lastSyncFit))
+            if (changed) listener?.invoke()
+        }
+    }
+
+    fun send(message: Messages.Message) {
+        val bytes = Messages.encode(message)
+        nodeClient.connectedNodes
+            .addOnSuccessListener { nodes ->
+                for (node in nodes) {
+                    messageClient.sendMessage(node.id, Messages.PATH, bytes)
+                }
+            }
+    }
+
+    /** Runs N pings and refines the stored fit (used before/during sessions). */
+    fun synchronize(rounds: Int = 8) {
+        scope.launch {
+            repeat(rounds) {
+                val t1 = SystemClock.elapsedRealtimeNanos()
+                send(Messages.SyncPing(sid, t1))
+                // t4/t2/t3 arrive via handleMessage; pacing keeps RTTs independent.
+                kotlinx.coroutines.delay(250)
+            }
+        }
+    }
+
+    private fun handleMessage(event: MessageEvent) {
+        val message = try {
+            Messages.decode(event.data)
+        } catch (e: Exception) {
+            return // malformed peer message: ignore, never crash
+        }
+        when (message) {
+            is Messages.Hello -> state.set(
+                ConnectionState(true, state.get().phoneName, state.get().lastSyncFit)
+            )
+            is Messages.SyncPing -> {
+                // Watch side: reply immediately. t2 = receive, t3 = send.
+                val t2 = SystemClock.elapsedRealtimeNanos()
+                val t3 = SystemClock.elapsedRealtimeNanos()
+                send(Messages.SyncPong(message.sid, message.t1PhoneNanos, t2, t3))
+            }
+            is Messages.SyncPong -> {
+                // We are the phone side in production, but a watch that both
+                // pings and pongs should not mix its own echoes into its fit.
+                return
+            }
+            is Messages.Start -> onStart(message)
+            is Messages.Stop -> onStop(message)
+            is Messages.Status, is Messages.StartAck, is Messages.StopAck,
+            is Messages.Result, is Messages.TransferAck, is Messages.Unknown ->
+                Unit // phone->watch only, or handled in later layers
+        }
+    }
+
+    private fun onStart(message: Messages.Start) {
+        if (!watchControl.shouldStart(message.sessionId, message.startSeq)) {
+            send(Messages.StartAck(message.sessionId, true, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+            return
+        }
+        val intent = android.content.Intent(context, RecorderService::class.java)
+            .setAction(RecorderService.ACTION_START)
+            .putExtra(RecorderService.EXTRA_SESSION_ID, message.sessionId)
+            .putExtra(RecorderService.EXTRA_TITLE, message.title)
+            .putExtra(RecorderService.EXTRA_DIRECTION, message.direction)
+        try {
+            context.startForegroundService(intent)
+            send(Messages.StartAck(message.sessionId, true, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+        } catch (e: Exception) {
+            send(Messages.StartAck(message.sessionId, false, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+        }
+    }
+
+    private fun onStop(message: Messages.Stop) {
+        if (!watchControl.shouldStop(message.sessionId, message.stopSeq)) {
+            send(Messages.StopAck(message.sessionId, true, message.sessionId, Messages.PROTOCOL_VERSION))
+            return
+        }
+        val recording = RecorderService.status.recording
+        context.startService(
+            android.content.Intent(context, RecorderService::class.java)
+                .setAction(RecorderService.ACTION_STOP)
+        )
+        send(Messages.StopAck(message.sessionId, true, message.sessionId, Messages.PROTOCOL_VERSION))
+    }
+
+    fun recordExchange(t1: Long, t2: Long, t3: Long, t4: Long) {
+        synchronized(exchanges) {
+            exchanges.add(ClockSync.Exchange(t1, t4, t2, t3))
+            if (exchanges.size > 64) exchanges.removeAt(0)
+            val fit = runCatching { ClockSync.fit(exchanges.toList()) }.getOrNull()
+            if (fit != null) {
+                state.set(ConnectionState(state.get().phoneConnected, state.get().phoneName, fit))
+            }
+        }
+    }
+}
