@@ -118,7 +118,10 @@ public object Messages {
         val peakHr: Int?,
         val averageHr: Int?,
         val watchDataQuality: String?,
-        val notes: String?
+        val notes: String?,
+        /** Canonical phone session start timestamp (elapsedRealtimeNanos at phone session start).
+         * Used for chronological sorting on the watch. Null for legacy results. */
+        val timestamp: Long? = null
     ) : Message { override val type: String get() = TYPE_RESULT }
 
     /** Phone confirms durable import of a completed watch log. */
@@ -210,7 +213,8 @@ public object Messages {
                 "peakHr" to nullableNum(message.peakHr),
                 "avgHr" to nullableNum(message.averageHr),
                 "quality" to nullableString(message.watchDataQuality),
-                "notes" to nullableString(message.notes)
+                "notes" to nullableString(message.notes),
+                "timestamp" to nullableNum(message.timestamp?.toDouble())
             )
             is TransferAck -> PitwallJson.obj(
                 "t" to PitwallJson.s(TYPE_TRANSFER_ACK), "v" to v,
@@ -294,7 +298,8 @@ public object Messages {
                 peakHr = root.number("peakHr")?.toInt(),
                 averageHr = root.number("avgHr")?.toInt(),
                 watchDataQuality = root.string("quality"),
-                notes = root.string("notes")
+                notes = root.string("notes"),
+                timestamp = root.number("timestamp")?.toLong()
             )
             TYPE_TRANSFER_ACK -> TransferAck(
                 sessionId = requiredString(root, "sid", "transferAck"),

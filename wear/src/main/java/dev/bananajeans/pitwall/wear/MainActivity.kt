@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -75,10 +76,20 @@ private fun WatchApp() {
     var connection by remember {
         mutableStateOf((context.applicationContext as PitwallWatchApplication).connection.connectionState)
     }
-    var results by remember { mutableStateOf(WatchResultsStore.list(context)) }
+    // Observe results reactively via LiveData
+    val resultsLiveData = WatchResultsStore.observeResults(context)
+    var results by mutableStateOf(WatchResultsStore.list(context))
     var showResult by remember { mutableStateOf(false) }
 
-    // Poll for state changes and refresh results when connection state changes
+    // Observe results LiveData for reactive updates
+    val lifecycleOwner = LocalLifecycleOwner.current
+    androidx.compose.runtime.LaunchedEffect(resultsLiveData) {
+        resultsLiveData.observe(lifecycleOwner, { newResults ->
+            results = newResults ?: emptyList()
+        })
+    }
+
+    // Poll for state changes
     DisposableEffect(Unit) {
         val app = context.applicationContext as PitwallWatchApplication
         val thread = Thread {
@@ -91,16 +102,11 @@ private fun WatchApp() {
         onDispose { thread.interrupt() }
     }
 
-    // Refresh pending count when not recording (also re-read when transfer completes)
+    // Refresh pending count - always re-read when not recording (transfer completion)
     if (pending < 0 || !status.recording) {
         val store = remember { WatchLogStore(context) }
         val count = remember(status.recording, connection.phoneConnected) { store.pendingTransfer().size }
         if (count != pending) pending = count
-    }
-    // Refresh results when a new result arrives (poll disk, it's small and cached)
-    if (!status.recording) {
-        val fresh = WatchResultsStore.list(context)
-        if (fresh != results) results = fresh
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -122,6 +128,8 @@ private fun WatchApp() {
                     phoneConnected = connection.phoneConnected,
                     showDiagnostics = showDiagnostics,
                     resultsAvailable = results.isNotEmpty(),
+                    hasError = status.error != null,
+                    errorMessage = status.error,
                     onToggleDiagnostics = { showDiagnostics = !showDiagnostics },
                     onShowResults = { showResult = true },
                     onStartTest = { startTestRecording(context) },
@@ -171,6 +179,8 @@ private fun IdlePanel(
     phoneConnected: Boolean,
     showDiagnostics: Boolean,
     resultsAvailable: Boolean,
+    hasError: Boolean,
+    errorMessage: String?,
     onToggleDiagnostics: () -> Unit,
     onShowResults: () -> Unit,
     onStartTest: () -> Unit,
@@ -182,6 +192,15 @@ private fun IdlePanel(
         textAlign = TextAlign.Center
     )
     when {
+        hasError -> {
+            // Show recorder error prominently - never fall through to "Ready"
+            Text(
+                "Recorder error: ${errorMessage ?: "unknown"}",
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
+            )
+            Button(onClick = onStartTest) { Text("Retry record") }
+        }
         pending > 0 -> Text(
             "$pending saved ${if (pending == 1) "log" else "logs"} waiting for phone",
             color = MaterialTheme.colorScheme.primary,

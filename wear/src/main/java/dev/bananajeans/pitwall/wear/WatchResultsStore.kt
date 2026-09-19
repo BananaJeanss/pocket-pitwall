@@ -2,9 +2,11 @@ package dev.bananajeans.pitwall.wear
 
 import android.content.Context
 import android.util.AtomicFile
+import androidx.lifecycle.MutableLiveData
 import dev.bananajeans.pitwall.protocol.Messages
 import dev.bananajeans.pitwall.protocol.PitwallJson
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Persisted post-session results on the watch (issue #25).
@@ -13,6 +15,8 @@ import java.io.File
  * stores it durably so results remain viewable after the watch screen turns
  * off, the app restarts, or the phone leaves Bluetooth range. One result per
  * session; newest sessions first.
+ *
+ * Uses MutableLiveData so the UI can observe changes reactively.
  */
 object WatchResultsStore {
 
@@ -20,8 +24,18 @@ object WatchResultsStore {
 
     fun dir(context: Context): File = File(context.filesDir, "results").apply { mkdirs() }
 
+    /** Live data for observing result list changes. */
+    private val resultsLiveData = MutableLiveData<List<Messages.Result>>()
+
+    fun observeResults(context: Context): MutableLiveData<List<Messages.Result>> = resultsLiveData
+
     fun save(context: Context, result: Messages.Result) {
         if (!ID.matches(result.sessionId)) return
+        
+        // Use the canonical phone session timestamp from the result if available,
+        // otherwise fall back to file modification time
+        val timestamp = result.timestamp ?: System.currentTimeMillis()
+        
         val json = PitwallJson.obj(
             "sid" to PitwallJson.s(result.sessionId),
             "bestLap" to (result.bestLapSeconds?.let { PitwallJson.n(it) } ?: PitwallJson.Value.Null),
@@ -33,7 +47,7 @@ object WatchResultsStore {
             "quality" to (result.watchDataQuality?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null),
             "notes" to (result.notes?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null),
             // Store result timestamp for chronological sorting
-            "timestamp" to PitwallJson.n(System.currentTimeMillis())
+            "timestamp" to PitwallJson.n(timestamp)
         )
         val atomic = AtomicFile(File(dir(context), "${result.sessionId}.json"))
         val stream = atomic.startWrite()
@@ -44,6 +58,8 @@ object WatchResultsStore {
             atomic.failWrite(stream)
             throw e
         }
+        // Refresh live data
+        refreshLiveData(context)
     }
 
     fun list(context: Context): List<Messages.Result> =
@@ -61,11 +77,13 @@ object WatchResultsStore {
                         peakHr = obj.number("peakHr")?.toInt(),
                         averageHr = obj.number("avgHr")?.toInt(),
                         watchDataQuality = obj.string("quality"),
-                        notes = obj.string("notes")
+                        notes = obj.string("notes"),
+                        timestamp = obj.number("timestamp")?.toLong()
                     )
                 }.getOrNull()
             }
-            // Sort by stored timestamp (newest first), fall back to file lastModified
+            // Sort by canonical phone session timestamp (newest first),
+            // fall back to file lastModified
             .sortedByDescending { result ->
                 val file = File(dir(context), "${result.sessionId}.json")
                 val obj = try { PitwallJson.parse(file.readText()) as PitwallJson.Value.Object } catch (_: Exception) { return@sortedByDescending 0L }
@@ -77,5 +95,13 @@ object WatchResultsStore {
     fun delete(context: Context, sessionId: String) {
         if (!ID.matches(sessionId)) return
         File(dir(context), "$sessionId.json").delete()
+        refreshLiveData(context)
+    }
+
+    private fun refreshLiveData(context: Context) {
+        // Post to main thread for LiveData
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            resultsLiveData.postValue(list(context))
+        }
     }
 }
