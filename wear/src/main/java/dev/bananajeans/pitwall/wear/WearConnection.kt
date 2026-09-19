@@ -193,4 +193,15 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
                 .setAction(RecorderService.ACTION_STOP)
         )
     }
+
+    fun recordExchange(t1: Long, t2: Long, t3: Long, t4: Long) {
+        synchronized(exchanges) {
+            exchanges.add(ClockSync.Exchange(t1, t4, t2, t3))
+            if (exchanges.size > 64) exchanges.removeAt(0)
+            val fit = runCatching { ClockSync.fit(exchanges.toList()) }.getOrNull()
+            if (fit != null) {
+                state.set(ConnectionState(state.get().phoneConnected, state.get().phoneName, fit))
+            }
+        }
+    }
 }
