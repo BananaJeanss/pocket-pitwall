@@ -126,20 +126,28 @@ public object ClockSync {
         // We approximate "watch midpoint time" as t2 (receive time), the
         // classic NTP reference point, and pair it with phone t1. Using t1
         // rather than the phone midpoint avoids double-counting delay.
+        //
+        // CRITICAL (PR #27 P1): Center x (t1) before the sums to avoid
+        // catastrophic cancellation when elapsedRealtimeNanos() is ~1e14–1e15.
+        // Without centering, n*sxx - sx*sx loses ~28 digits of precision.
         val n = points.size
+        val xMean = points.map { it.t1.toDouble() }.average()
         var sx = 0.0
         var sy = 0.0
         var sxx = 0.0
         var sxy = 0.0
         for (p in points) {
-            val x = p.t1.toDouble()
+            val x = p.t1.toDouble() - xMean
             val y = p.t1.toDouble() + p.offset
             sx += x; sy += y; sxx += x * x; sxy += x * y
         }
+        // Note: x is centered (sx == 0), but y is NOT centered.
+        // The centered regression gives intercept_centered = sy/n.
+        // We need intercept for uncentered x: intercept = yMean - slope * xMean.
         val denom = n * sxx - sx * sx
         if (denom == 0.0) throw IllegalArgumentException("Degenerate exchange timestamps (all identical)")
         val slope = (n * sxy - sx * sy) / denom
-        val intercept = (sy - slope * sx) / n
+        val intercept = sy / n - slope * xMean
 
         var residualSq = 0.0
         for (p in points) {

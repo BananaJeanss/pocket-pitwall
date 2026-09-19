@@ -108,6 +108,7 @@ public object PitwallJson {
             return parseValue()
         }
         fun parseValue(): Value {
+            skipWhitespace()
             if (atEnd()) throw JsonException("Unexpected end of JSON at offset $pos")
             return when (text[pos]) {
                 '{' -> parseObject()
