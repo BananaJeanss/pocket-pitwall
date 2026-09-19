@@ -75,6 +75,12 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
     fun onStartAck(ack: Messages.StartAck) {
         if (ack.sessionId != sessionId) return // stale/foreign ack
         if (state != CommandState.PENDING_START) return // duplicate ack
+        // Only transition to RECORDING when the watch actually started recording.
+        if (!ack.recording) {
+            // Start failed on watch (e.g., sensors unavailable); stay in PENDING_START
+            // so the phone can retry or surface the failure.
+            return
+        }
         state = CommandState.RECORDING
         pendingSince = 0
     }

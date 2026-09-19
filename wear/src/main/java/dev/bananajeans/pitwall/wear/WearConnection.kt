@@ -10,6 +10,7 @@ import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.ClockSync
 import dev.bananajeans.pitwall.protocol.Messages
 import dev.bananajeans.pitwall.protocol.WatchSessionControl
+import dev.bananajeans.pitwall.wear.RecorderService
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -141,10 +142,18 @@ class WearConnection(private val context: Context) {
             .putExtra(RecorderService.EXTRA_SESSION_ID, message.sessionId)
             .putExtra(RecorderService.EXTRA_TITLE, message.title)
             .putExtra(RecorderService.EXTRA_DIRECTION, message.direction)
+        // The recorder posts sensor registration and log open to its handler thread.
+        // We need to wait for it to confirm "recording=true" before ACKing.
+        val ackCallback = object : RecorderService.Companion.RecordingCallback {
+            override fun onRecordingStarted(success: Boolean) {
+                send(Messages.StartAck(message.sessionId, success, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+            }
+        }
+        RecorderService.setRecordingCallback(message.sessionId, ackCallback)
         try {
             context.startForegroundService(intent)
-            send(Messages.StartAck(message.sessionId, true, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
         } catch (e: Exception) {
+            RecorderService.clearRecordingCallback(message.sessionId)
             send(Messages.StartAck(message.sessionId, false, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
         }
     }
@@ -154,12 +163,16 @@ class WearConnection(private val context: Context) {
             send(Messages.StopAck(message.sessionId, true, message.sessionId, Messages.PROTOCOL_VERSION))
             return
         }
-        val recording = RecorderService.status.recording
+        val ackCallback = object : RecorderService.Companion.StopCallback {
+            override fun onStopped(finalized: Boolean) {
+                send(Messages.StopAck(message.sessionId, finalized, message.sessionId, Messages.PROTOCOL_VERSION))
+            }
+        }
+        RecorderService.setStopCallback(message.sessionId, ackCallback)
         context.startService(
             android.content.Intent(context, RecorderService::class.java)
                 .setAction(RecorderService.ACTION_STOP)
         )
-        send(Messages.StopAck(message.sessionId, true, message.sessionId, Messages.PROTOCOL_VERSION))
     }
 
     fun recordExchange(t1: Long, t2: Long, t3: Long, t4: Long) {
