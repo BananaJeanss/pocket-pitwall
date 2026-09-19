@@ -107,11 +107,45 @@ class SessionControlTest {
     }
 
     @Test
-    fun watchControlBoundsMemory() {
+    fun watchControlRejectsReorderedOldPackets() {
         val watch = WatchSessionControl()
-        for (i in 0 until 100) watch.shouldStart("session-$i", 1)
-        // Internal maps are capped; a fresh-but-old session still starts once.
-        assertTrue(watch.shouldStart("session-0", 1))
-        assertTrue(!watch.shouldStart("session-99", 1))
+        // Handle seq=2 first (delayed seq=1 arrives later)
+        assertTrue(watch.shouldStart("s1", 2))
+        // Now delayed seq=1 arrives - should be suppressed
+        assertTrue(!watch.shouldStart("s1", 1), "reordered old packet must be suppressed")
+        // But a duplicate of the max seq should also be suppressed
+        assertTrue(!watch.shouldStart("s1", 2))
+        // New higher seq should execute
+        assertTrue(watch.shouldStart("s1", 3))
+    }
+
+    @Test
+    fun phoneControlStartAckRecordingFalseStaysPending() {
+        val control = SessionControl()
+        control.start("s1", "Track", "Normal")
+        // Watch explicitly sends recording=false (startup failed)
+        control.onStartAck(Messages.StartAck("s1", false, "0.3.0", 1))
+        // Should NOT transition to RECORDING
+        assertEquals(SessionControl.CommandState.PENDING_START, control.state)
+        // Retry should still work
+        val retry = control.startMessage()
+        assertNotNull(retry)
+        assertEquals(1, retry!!.startSeq)
+    }
+
+    @Test
+    fun phoneControlStopAckFinalizedFalseStaysPending() {
+        val control = SessionControl()
+        control.start("s1", "Track", "Normal")
+        control.onStartAck(Messages.StartAck("s1", true, "0.3.0", 1))
+        control.stop()
+        // Watch sends finalized=false (fsync/finalization failed)
+        control.onStopAck(Messages.StopAck("s1", false, "s1", 1))
+        // Should NOT transition to STOPPED
+        assertEquals(SessionControl.CommandState.PENDING_STOP, control.state)
+        // Retry should still work - use stopMessage() to get the pending stop
+        val retry = control.stopMessage()
+        assertNotNull(retry)
+        assertEquals(1, retry!!.stopSeq)
     }
 }
