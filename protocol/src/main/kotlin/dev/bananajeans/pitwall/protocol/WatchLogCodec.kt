@@ -60,8 +60,10 @@ public object WatchLogCodec {
     public const val FRAME_FIXED_BYTES: Int = 10
     public const val SAMPLE_RECORD_BYTES: Int = 28
     private const val ACCURACY_RECORD_BYTES: Int = 9
+    private const val HEART_RATE_RECORD_BYTES: Int = 16
     private const val FRAME_TYPE_SAMPLES: Int = 1
     private const val FRAME_TYPE_ACCURACY: Int = 2
+    private const val FRAME_TYPE_HEART_RATE: Int = 3
     private const val FLOAT_SCALE: Double = 1_000_000.0
     private const val MAX_METADATA_BYTES: Int = 64 * 1024
 
@@ -80,6 +82,9 @@ public object WatchLogCodec {
 
     /** A timestamped accuracy change for a sensor (no values). */
     public data class AccuracyEvent(val sensorType: Int, val timestampNanos: Long, val accuracy: Int)
+
+    /** A timestamped heart-rate reading (issue #24). */
+    public data class HeartRateSample(val bpm: Int, val timestampNanos: Long, val accuracy: Int)
 
     /** Watch log metadata, stored as JSON in the header. */
     public data class Metadata(
@@ -110,6 +115,7 @@ public object WatchLogCodec {
         val metadata: Metadata,
         val samples: List<Sample>,
         val accuracyEvents: List<AccuracyEvent>,
+        val heartRate: List<HeartRateSample>,
         /** False when the trailer is missing/mismatched (crash or truncation). */
         val complete: Boolean,
         val incompleteReason: String?
@@ -161,6 +167,16 @@ public object WatchLogCodec {
         public fun appendAccuracyEvent(event: AccuracyEvent) {
             check(!finished) { "Writer already finished" }
             val frame = encodeAccuracyFrame(event)
+            out.write(frame)
+            payloadCrc.update(frame, 0, frame.size)
+            payloadBytes += frame.size
+        }
+
+        /** Appends one heart-rate frame (issue #24); independent of the IMU chains. */
+        public fun appendHeartRate(samples: List<HeartRateSample>) {
+            check(!finished) { "Writer already finished" }
+            if (samples.isEmpty()) return
+            val frame = encodeHeartRateFrame(samples)
             out.write(frame)
             payloadCrc.update(frame, 0, frame.size)
             payloadBytes += frame.size
@@ -224,7 +240,35 @@ public object WatchLogCodec {
             patchFrameCrc(frame)
             return frame
         }
+
+        private fun encodeHeartRateFrame(samples: List<HeartRateSample>): ByteArray {
+            val recordBytes = 16
+            val buf = ByteArrayOutputStream(FRAME_FIXED_BYTES + samples.size * recordBytes)
+            buf.write('F'.code)
+            buf.write(FRAME_TYPE_HEART_RATE)
+            writeU16(buf, samples.size)
+            buf.write(0)
+            buf.write(0)
+            buf.write(byteArrayOf(0, 0, 0, 0))
+            for (s in samples) {
+                val previous = previousTimestamps.getOrPut(HR_CHAIN_KEY) { previousTimestamps.getValue(SENSOR_CHAIN_SEED) }
+                if (s.timestampNanos < previous)
+                    throw IllegalStateException("Non-monotonic heart-rate sample at ${s.timestampNanos}")
+                writeU64(buf, s.timestampNanos - previous)
+                buf.write(s.bpm.coerceIn(0, 65535) and 0xFF)
+                buf.write((s.bpm.coerceIn(0, 65535) ushr 8) and 0xFF)
+                buf.write(s.accuracy.coerceIn(0, 255))
+                buf.write(byteArrayOf(0, 0, 0, 0, 0))
+                previousTimestamps[HR_CHAIN_KEY] = s.timestampNanos
+            }
+            val frame = buf.toByteArray()
+            patchFrameCrc(frame)
+            return frame
+        }
     }
+
+    // Timestamp-chain key for heart rate (independent of IMU sensor chains).
+    private const val HR_CHAIN_KEY: Int = -2
 
     // Key used to seed per-sensor timestamp chains; negative so it can never
     // collide with a real android.hardware.Sensor.TYPE_* constant.
@@ -295,6 +339,7 @@ public object WatchLogCodec {
     ): Pair<WatchLog, Int?> {
         val samples = ArrayList<Sample>(1024)
         val accuracies = ArrayList<AccuracyEvent>()
+        val heartRates = ArrayList<HeartRateSample>()
         val lastTimestamps = HashMap<Int, Long>()
         var pos = payloadStart
         var stoppedAt: Int? = null
@@ -310,6 +355,7 @@ public object WatchLogCodec {
             val recordSize = when (frameType) {
                 FRAME_TYPE_SAMPLES -> SAMPLE_RECORD_BYTES
                 FRAME_TYPE_ACCURACY -> ACCURACY_RECORD_BYTES
+                FRAME_TYPE_HEART_RATE -> HEART_RATE_RECORD_BYTES
                 else -> { stoppedAt = pos; break }
             }
             val frameLength = FRAME_FIXED_BYTES + count * recordSize
@@ -346,6 +392,21 @@ public object WatchLogCodec {
                     p += SAMPLE_RECORD_BYTES
                     sampleCount++
                 }
+            } else if (frameType == FRAME_TYPE_HEART_RATE) {
+                for (i in 0 until count) {
+                    val delta = readU64(bytes, p)
+                    if (delta < 0) { corrupted = true; break }
+                    val ts = lastTimestamps.getOrPut(HR_CHAIN_KEY) { metadata.startedAtMonotonicNanos } + delta
+                    heartRates.add(
+                        HeartRateSample(
+                            bpm = (bytes[p + 8].toInt() and 0xFF) or ((bytes[p + 9].toInt() and 0xFF) shl 8),
+                            timestampNanos = ts,
+                            accuracy = bytes[p + 10].toInt() and 0xFF
+                        )
+                    )
+                    lastTimestamps[HR_CHAIN_KEY] = ts
+                    p += HEART_RATE_RECORD_BYTES
+                }
             } else {
                 val delta = readU64(bytes, p)
                 if (delta >= 0) {
@@ -363,7 +424,7 @@ public object WatchLogCodec {
         }
 
         // Sanity: a finalized log with zero samples is a recording failure.
-        val log = WatchLog(metadata, samples, accuracies, complete, null)
+        val log = WatchLog(metadata, samples, accuracies, heartRates, complete, null)
         return Pair(log, stoppedAt)
     }
 

@@ -208,4 +208,50 @@ class WatchLogCodecTest {
         val complete = WatchLogCodec.read(ByteArrayInputStream(out.toByteArray())) as WatchLogCodec.ReadResult.Complete
         assertEquals(0, complete.log.samples.size)
     }
+
+    @Test
+    fun heartRateRoundTripsIndependentlyOfImu() {
+        val out = ByteArrayOutputStream()
+        val writer = WatchLogCodec.Writer(out, metadata())
+        writer.appendSamples(4, samples(2))
+        writer.appendHeartRate(
+            listOf(
+                WatchLogCodec.HeartRateSample(120, 50_010_000_000L, 3),
+                WatchLogCodec.HeartRateSample(124, 50_011_000_000L, 3),
+                WatchLogCodec.HeartRateSample(131, 50_012_000_000L, 3)
+            )
+        )
+        writer.appendSamples(4, samples(1, startNanos = 50_015_000_100L))
+        writer.finish()
+        val log = readComplete(out.toByteArray())
+        assertEquals(3, log.heartRate.size)
+        assertEquals(120, log.heartRate[0].bpm)
+        assertEquals(131, log.heartRate[2].bpm)
+        // HR timestamps are exact and independent of the gyro chain.
+        assertEquals(50_011_000_000L, log.heartRate[1].timestampNanos)
+        // IMU chain unaffected by the interleaved HR frames.
+        assertEquals(3, log.samples.size)
+        assertEquals(50_015_000_100L, log.samples[2].timestampNanos)
+    }
+
+    @Test
+    fun nonMonotonicHeartRateRejected() {
+        val out = ByteArrayOutputStream()
+        val writer = WatchLogCodec.Writer(out, metadata())
+        val good = WatchLogCodec.HeartRateSample(100, 50_000_000_000L, 3)
+        val backwards = WatchLogCodec.HeartRateSample(101, 49_999_999_999L, 3)
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            writer.appendHeartRate(listOf(good, backwards))
+        }
+    }
+
+    @Test
+    fun logWithoutHeartRateHasEmptyHrList() {
+        val out = ByteArrayOutputStream()
+        val writer = WatchLogCodec.Writer(out, metadata())
+        writer.appendSamples(4, samples(2))
+        writer.finish()
+        val log = readComplete(out.toByteArray())
+        assertEquals(0, log.heartRate.size)
+    }
 }

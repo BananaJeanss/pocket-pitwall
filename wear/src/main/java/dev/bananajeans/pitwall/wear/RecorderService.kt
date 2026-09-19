@@ -110,6 +110,8 @@ class RecorderService : Service(), SensorEventListener {
     private lateinit var store: WatchLogStore
     private lateinit var worker: HandlerThread
     private lateinit var handler: Handler
+    private var heartRate: HeartRateRecorder? = null
+    private val pendingHeartRate = ArrayList<WatchLogCodec.HeartRateSample>()
     private var writer: WatchLogCodec.Writer? = null
     private var stream: FileOutputStream? = null
     private var wake: PowerManager.WakeLock? = null
@@ -195,6 +197,14 @@ class RecorderService : Service(), SensorEventListener {
             }
             require(registeredAccel && registeredGyro) { "Required IMU sensors (accelerometer and gyroscope) failed to register" }
 
+            // Optional heart rate: independently failure-tolerant (issue #24).
+            // Denied permission or a missing sensor never blocks IMU logging.
+            heartRate = HeartRateRecorder(this, manager) { bpm, timestampNanos, accuracy ->
+                synchronized(pendingHeartRate) { pendingHeartRate.add(WatchLogCodec.HeartRateSample(bpm, timestampNanos, accuracy)) }
+            }.also { hr ->
+                if (!hr.start()) heartRate = null // HR unavailable; IMU continues
+            }
+
             update { it.copy(sessionId = sessionId, recording = true, healthy = true, samples = 0, elapsedSeconds = 0.0, error = null) }
             // Signal that real recording has started; WearConnection will ACK the phone.
             triggerRecordingCallback(sessionId, true)
@@ -213,6 +223,16 @@ class RecorderService : Service(), SensorEventListener {
 
     private fun tick() {
         if (closing || startedAtNanos == 0L) return
+        // Periodic HR flush (~1 Hz) so crashes lose at most a second of HR.
+        synchronized(pendingHeartRate) {
+            if (pendingHeartRate.isNotEmpty()) {
+                try {
+                    writer?.appendHeartRate(ArrayList(pendingHeartRate))
+                    stream?.fd?.sync()
+                } catch (_: Exception) { /* HR is optional */ }
+                pendingHeartRate.clear()
+            }
+        }
         update {
             it.copy(
                 elapsedSeconds = (SystemClock.elapsedRealtimeNanos() - startedAtNanos) / 1e9,
@@ -303,8 +323,17 @@ class RecorderService : Service(), SensorEventListener {
         closing = true
         handler.removeCallbacksAndMessages(null)
         manager.unregisterListener(this)
+        heartRate?.stop()
         // Flush any partial batches so a complete stop loses nothing.
         for (type in ArrayList(pending.keys)) flush(type)
+        synchronized(pendingHeartRate) {
+            if (pendingHeartRate.isNotEmpty() && writer != null && complete) {
+                try {
+                    writer?.appendHeartRate(ArrayList(pendingHeartRate))
+                } catch (_: Exception) { /* HR is optional; never fail on it */ }
+                pendingHeartRate.clear()
+            }
+        }
         var finalizedOk = complete
         try {
             if (complete) writer?.finish() else writer?.close()
