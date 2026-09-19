@@ -78,7 +78,7 @@ class WatchLogImporterTest {
         // or is rejected; it must NEVER be reported complete.
         when (result) {
             is WatchLogImporter.Result.Imported -> assertFalse(result.log.complete)
-            is WatchLogImporter.Result.Rejected -> assertTrue(result.reason.contains("Corrupt"))
+            is WatchLogImporter.Result.Rejected -> assertTrue(result.reason.contains("Corrupt") || result.reason.contains("Incomplete"))
             is WatchLogImporter.Result.Duplicate -> throw AssertionError("cannot duplicate on first import")
         }
     }
@@ -110,8 +110,12 @@ class WatchLogImporterTest {
     fun incompleteLogImportsMarkedIncomplete() {
         val importer = WatchLogImporter(tmp.newFolder())
         val result = importer.import("sess-crash", buildLog("sess-crash", samples = 3, finalize = false))
-        assertTrue(result is WatchLogImporter.Result.Imported)
-        assertFalse((result as WatchLogImporter.Result.Imported).log.complete)
+        // Incomplete logs are now rejected to prevent deletion of intact watch copies
+        // on truncated channel transfers. The watch will retry with a complete log.
+        assertTrue(result is WatchLogImporter.Result.Rejected)
+        if (result is WatchLogImporter.Result.Rejected) {
+            assertTrue(result.reason.contains("Incomplete"))
+        }
     }
 
     @Test
