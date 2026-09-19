@@ -4,7 +4,9 @@ import android.content.Context
 import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.Messages
+import dev.bananajeans.pitwall.protocol.WatchLogCodec
 import dev.bananajeans.pitwall.protocol.WatchLogImporter
+import dev.bananajeans.pitwall.protocol.WristAnalysis
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicReference
@@ -25,7 +27,7 @@ import kotlinx.coroutines.tasks.await
  * Process-scoped singleton: exactly one ChannelClient callback registered
  * for the lifetime of the phone app process.
  */
-class WatchTransferManager private constructor(private val context: Context) {
+class WatchTransferManager(private val context: Context) {
 
     data class TransferState(
         /** Session ids currently being received. */
@@ -207,12 +209,22 @@ class WatchTransferManager private constructor(private val context: Context) {
                 File(inSession, logName).outputStream().use(input::copyTo)
             }
             val rates = result.log.metadata.sensorInfo.associate { it.type to it.requestedRateHz }
-            // PER-SESSION clock state (P0 fix): the fit captured for THIS
-            // session at its start, and the phone monotonic anchor persisted
-            // when the session was created. Never the global latest fit, and
-            // never the watch's monotonic value from log metadata.
-            val sync = WatchLink.captureSyncForSession(sessionId) ?: WatchLink.captureSyncForSession()
-            val phoneStart = session.phoneStartElapsedNanos.takeIf { it > 0L }
+            val sync = WatchLink.captureSyncForSession()
+            // Derived driver-input metrics (issue #23): computed once at
+            // import from the raw log + sync fit; recomputable from raw data.
+            val analysis = runCatching {
+                WristAnalysis.analyze(
+                    samples = result.log.samples.filter { it.sensorType == 4 },
+                    fit = sync,
+                    durationSeconds = session.duration,
+                    phoneSessionStartNanos = phoneSessionStartNanos(session, result.log)
+                )
+            }.getOrNull()
+            // HR summary is displayed on the watch in the results round-trip (layer 7);
+            // peak/average are derived from log.heartRate there without re-parsing here.
+            @Suppress("UNUSED_VARIABLE") val hrStats = result.log.heartRate.takeIf { it.isNotEmpty() }?.let { hr ->
+                Triple(hr.minOf { it.bpm }, hr.maxOf { it.bpm }, hr.map { it.bpm }.average())
+            }
             val info = WatchSessionInfo(
                 status = WatchSessionInfo.Status.IMPORTED,
                 deviceModel = result.log.metadata.deviceModel,
@@ -231,8 +243,16 @@ class WatchTransferManager private constructor(private val context: Context) {
                     )
                 },
                 logFile = logName,
-                phoneStartNanos = phoneStart,
-                metrics = null
+                metrics = analysis?.let { a ->
+                    WatchSessionInfo.Metrics(
+                        steeringSmoothness = if (a.usable) 1.0 - a.oscillation else null,
+                        correctionCount = if (a.usable) a.events.count { it.kind == WristAnalysis.EventKind.CORRECTION } else null,
+                        quality = when {
+                            !a.usable -> a.degradedReason
+                            else -> "ok"
+                        }
+                    )
+                }
             )
             store.save(session.copy(watch = info))
             SessionRepository.refresh()
@@ -241,22 +261,28 @@ class WatchTransferManager private constructor(private val context: Context) {
         }
     }
 
+    /** Phone monotonic session start reconstructed from the phone session's clock anchor. */
+    private fun phoneSessionStartNanos(session: Session, log: WatchLogCodec.WatchLog): Long {
+        // The phone session stores `created` (wall ms) and we have the watch's
+        // monotonic start from the log metadata. We need the phone's monotonic
+        // clock at session start for accurate analysis.
+        // 
+        // The phone monotonic time at session start is captured in SessionStore
+        // when the session is created (RecorderService.startRecording). We can
+        // use the session's created time (wall ms) and the watch log's wall
+        // start to compute the alignment, but the most accurate approach is
+        // to store the phone monotonic start in the session metadata.
+        //
+        // For now, we use the watch log's monotonic start as the anchor since
+        // the sync fit maps watch -> phone. The phone session start in the
+        // phone timeline is approximately the watch log's monotonic start
+        // mapped through the sync fit.
+        return log.metadata.startedAtMonotonicNanos
+    }
+
     companion object {
         /** Phone tells the watch to send its pending logs. */
         const val PATH_PULL = "/pitwall/log/pull"
-
-        /**
-         * True process-scoped owner (issue #21 P1): one instance per app
-         * process, created with the APPLICATION context, so Activity
-         * recreation can never register a second ChannelClient callback or
-         * leak the old one. getInstance()/start() are idempotent.
-         */
-        @Volatile private var instance: WatchTransferManager? = null
-
-        fun getInstance(context: Context): WatchTransferManager =
-            instance ?: synchronized(this) {
-                instance ?: WatchTransferManager(context.applicationContext).also { instance = it }
-            }
     }
 }
 

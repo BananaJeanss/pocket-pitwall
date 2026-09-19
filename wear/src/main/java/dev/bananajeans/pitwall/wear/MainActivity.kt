@@ -2,6 +2,7 @@ package dev.bananajeans.pitwall.wear
 
 import android.content.Context
 import android.content.Intent
+import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,6 +46,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Recover orphaned recordings from a previous process/watch restart.
         WatchLogStore(this).recover()
+        // BODY_SENSORS is needed only for optional heart-rate; IMU recording
+        // works without it (issue #24 tolerance contract).
+        if (HeartRateRecorder.needsPermission(this)) {
+            requestPermissions(arrayOf(Manifest.permission.BODY_SENSORS), 1)
+        }
         setContent {
             MaterialTheme {
                 WatchApp()
