@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
  * The watch recorder itself never touches this class: losing the phone
  * mid-session only degrades coordination, never logging.
  */
-class WearConnection(private val context: Context) {
+class WearConnection(private val context: Context, private val transferQueue: TransferQueue? = null) {
 
     data class ConnectionState(
         val phoneConnected: Boolean = false,
@@ -66,6 +66,11 @@ class WearConnection(private val context: Context) {
     private val diskExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     private val messageListener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
+        if (event.path == TransferQueue.PATH_PULL) {
+            // Phone asked us to send pending logs; open one channel per log.
+            transferQueue?.serveAll()
+            return@OnMessageReceivedListener
+        }
         handleMessage(event)
     }
 
@@ -82,6 +87,7 @@ class WearConnection(private val context: Context) {
                 kotlinx.coroutines.delay(10_000)
             }
         }
+        transferQueue?.start()
     }
 
     fun stop() {
@@ -144,8 +150,9 @@ class WearConnection(private val context: Context) {
             }
             is Messages.Start -> onStart(message)
             is Messages.Stop -> onStop(message)
+            is Messages.TransferAck -> transferQueue?.onAck(message)
             is Messages.Status, is Messages.StartAck, is Messages.StopAck,
-            is Messages.Result, is Messages.TransferAck, is Messages.Unknown ->
+            is Messages.Result, is Messages.Unknown ->
                 Unit // phone->watch only, or handled in later layers
         }
     }
