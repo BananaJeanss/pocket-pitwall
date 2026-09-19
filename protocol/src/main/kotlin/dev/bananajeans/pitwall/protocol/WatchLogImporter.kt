@@ -44,6 +44,12 @@ class WatchLogImporter(private val storeDir: File) {
             is WatchLogCodec.ReadResult.Complete -> read.log to true
             is WatchLogCodec.ReadResult.Incomplete -> read.log to false
         }
+        // Reject incomplete logs - they may be truncated in transit and the watch
+        // still has the intact source. Only accept COMPLETE logs to prevent
+        // accidental deletion of valid watch copies on channel disconnect.
+        if (!complete) {
+            return Result.Rejected("Incomplete log (missing/invalid trailer); transfer may be truncated")
+        }
         if (log.metadata.sessionId != sessionId) {
             return Result.Rejected("Log metadata session id does not match transfer id")
         }

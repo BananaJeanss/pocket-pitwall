@@ -51,8 +51,7 @@ class WatchTransferManager(private val context: Context) {
         })
     }
 
-    /**
-     * Asks the watch to open channels for its pending logs. The watch replies
+    /** Asks the watch to open channels for its pending logs. The watch replies
      * by opening one channel per queued session; each incoming channel is
      * received, validated, stored and acked.
      */
@@ -69,6 +68,14 @@ class WatchTransferManager(private val context: Context) {
         }
     }
 
+    /**
+     * Called when the phone's own session stops to ensure we pull any newly
+     * finalized watch log promptly (not just at app startup).
+     */
+    fun pullAfterSessionStop() {
+        pullPending()
+    }
+
     private fun receive(channel: ChannelClient.Channel) {
         val sessionId = channel.path.removePrefix("/pitwall/log/").takeIf {
             WatchLogImporter.SESSION_ID.matches(it)
@@ -78,39 +85,49 @@ class WatchTransferManager(private val context: Context) {
         channelClient.getInputStream(channel).addOnSuccessListener { input ->
             scope.launch {
                 try {
-                    val buffer = ByteArrayOutputStream()
-                    input.use { it.copyTo(buffer) }
-                    val bytes = buffer.toByteArray()
-                    when (val result = importer.import(sessionId, bytes)) {
-                        is WatchLogImporter.Result.Imported -> {
-                            state.set(
-                                state.get().copy(
-                                    active = state.get().active - sessionId,
-                                    imported = state.get().imported + sessionId,
-                                    lastError = null
+                    // Stream to temp file instead of buffering in memory - large logs
+                    // can be tens of MB and ByteArrayOutputStream can OOM.
+                    val tempDir = java.io.File(context.cacheDir, "watch-import")
+                    tempDir.mkdirs()
+                    val tempFile = java.io.File.createTempFile("import-$sessionId-", ".pwtch", tempDir)
+                    try {
+                        val output = java.io.FileOutputStream(tempFile)
+                        input.use { it.copyTo(output) }
+                        output.flush()
+                        val bytes = tempFile.readBytes()
+                        when (val result = importer.import(sessionId, bytes)) {
+                            is WatchLogImporter.Result.Imported -> {
+                                state.set(
+                                    state.get().copy(
+                                        active = state.get().active - sessionId,
+                                        imported = state.get().imported + sessionId,
+                                        lastError = null
+                                    )
                                 )
-                            )
-                            ack(sessionId, accepted = true, reason = null)
-                            // Session model integration happens in the next layer.
-                        }
-                        is WatchLogImporter.Result.Duplicate -> {
-                            state.set(
-                                state.get().copy(
-                                    active = state.get().active - sessionId,
-                                    imported = state.get().imported + sessionId
+                                ack(sessionId, accepted = true, reason = null)
+                                // Session model integration happens in the next layer.
+                            }
+                            is WatchLogImporter.Result.Duplicate -> {
+                                state.set(
+                                    state.get().copy(
+                                        active = state.get().active - sessionId,
+                                        imported = state.get().imported + sessionId
+                                    )
                                 )
-                            )
-                            ack(sessionId, accepted = true, reason = null)
-                        }
-                        is WatchLogImporter.Result.Rejected -> {
-                            state.set(
-                                state.get().copy(
-                                    active = state.get().active - sessionId,
-                                    lastError = result.reason
+                                ack(sessionId, accepted = true, reason = null)
+                            }
+                            is WatchLogImporter.Result.Rejected -> {
+                                state.set(
+                                    state.get().copy(
+                                        active = state.get().active - sessionId,
+                                        lastError = result.reason
+                                    )
                                 )
-                            )
-                            ack(sessionId, accepted = false, reason = result.reason)
+                                ack(sessionId, accepted = false, reason = result.reason)
+                            }
                         }
+                    } finally {
+                        tempFile.delete()
                     }
                 } catch (e: Exception) {
                     state.set(
