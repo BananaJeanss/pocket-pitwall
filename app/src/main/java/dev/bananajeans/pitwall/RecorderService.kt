@@ -70,6 +70,8 @@ class RecorderService : Service(), SensorEventListener {
                 sensors.forEach { require(manager.registerListener(this,it,20_000,handler)) { "Could not start sensor ${it.name}" } }
                 handler.post(ticker)
                 handler.postDelayed({ finish("complete") },3_600_000)
+                // Tell the watch to start its own local recording (best effort).
+                WatchLink.onPhoneSessionStarted(session!!.id, title, direction)
             } catch(e: Exception) { error.value=e.message ?: "Recording failed"; finish("interrupted") }
         }
         return START_NOT_STICKY
@@ -121,6 +123,8 @@ class RecorderService : Service(), SensorEventListener {
                     "Could not save session metadata: ${it.message}"
                 }
             }
+            // Tell the watch to finalize its log and queue the transfer.
+            WatchLink.onPhoneSessionStopped(finished.id)
         }
 
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }

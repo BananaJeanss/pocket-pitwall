@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.BODY_SENSORS" />
     <uses-feature android:name="android.hardware.type.watch" />
     <application
+        android:name=".PitwallWatchApplication"
         android:theme="@style/Theme.Pitwall.Wear"
         android:label="Pocket Pitwall"
         android:icon="@mipmap/ic_launcher"
