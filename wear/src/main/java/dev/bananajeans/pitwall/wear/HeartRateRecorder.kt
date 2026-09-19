@@ -78,8 +78,7 @@ class HeartRateRecorder(
     companion object {
         /** Requests BODY_SENSORS at runtime (watch UI calls this on launch). */
         fun needsPermission(context: Context): Boolean =
-            Build.VERSION.SDK_INT < 33 &&
-                ContextCompat.checkSelfPermission(context, Manifest.permission.BODY_SENSORS) !=
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BODY_SENSORS) !=
                 PackageManager.PERMISSION_GRANTED
     }
 }

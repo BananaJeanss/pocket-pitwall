@@ -52,7 +52,7 @@ import kotlin.math.roundToLong
  */
 public object WatchLogCodec {
 
-    public const val FORMAT_VERSION: Int = 1
+    public const val FORMAT_VERSION: Int = 2
     public const val MAGIC: String = "PWTCH"
     public const val TRAILER_MAGIC: String = "PWEND"
     private const val HEADER_FIXED: Int = 10
@@ -283,8 +283,8 @@ public object WatchLogCodec {
         if (String(bytes, 0, 5, Charsets.US_ASCII) != MAGIC)
             throw CorruptLogException("Not a PWTCH log")
         val version = bytes[5].toInt() and 0xFF
-        if (version != FORMAT_VERSION)
-            throw CorruptLogException("Unsupported format version $version")
+        if (version < 1 || version > FORMAT_VERSION)
+            throw CorruptLogException("Unsupported format version $version (max $FORMAT_VERSION)")
         val headerLength = readU32(bytes, 6)
         if (headerLength < HEADER_FIXED || headerLength > bytes.size)
             throw CorruptLogException("Header length $headerLength outside file")
@@ -356,7 +356,14 @@ public object WatchLogCodec {
                 FRAME_TYPE_SAMPLES -> SAMPLE_RECORD_BYTES
                 FRAME_TYPE_ACCURACY -> ACCURACY_RECORD_BYTES
                 FRAME_TYPE_HEART_RATE -> HEART_RATE_RECORD_BYTES
-                else -> { stoppedAt = pos; break }
+                else -> {
+                    // Unknown frame type in a forward-compatible log: skip the frame
+                    // if we can determine its length, otherwise stop parsing.
+                    // For now, we stop at unknown frames since we can't determine length.
+                    // Readers must skip unknown frame types in v1+ to allow independent updates.
+                    stoppedAt = pos
+                    break
+                }
             }
             val frameLength = FRAME_FIXED_BYTES + count * recordSize
             if (frameLength <= 0 || pos + frameLength > payloadEnd) { stoppedAt = pos; break }
@@ -465,8 +472,8 @@ public object WatchLogCodec {
         val root = PitwallJson.parse(String(bytes, offset, length, Charsets.UTF_8)) as? PitwallJson.Value.Object
             ?: throw CorruptLogException("Metadata is not a JSON object")
         val schema = root.number("schema")?.toInt() ?: 0
-        if (schema != FORMAT_VERSION)
-            throw CorruptLogException("Metadata schema $schema not supported (expected $FORMAT_VERSION)")
+        if (schema < 1 || schema > FORMAT_VERSION)
+            throw CorruptLogException("Metadata schema $schema not supported (expected 1..$FORMAT_VERSION)")
         val sensors = root.array("sensors")?.items?.mapNotNull { item ->
             val o = item as? PitwallJson.Value.Object ?: return@mapNotNull null
             Metadata.SensorInfo(

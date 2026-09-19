@@ -57,8 +57,7 @@ object WristAnalysis {
         val usable: Boolean get() = degradedReason == null
     }
 
-    /**
-     * Analyze a session's watch log.
+    /** Analyze a session's watch log.
      *
      * @param samples raw watch gyroscope samples (watch monotonic nanos)
      * @param fit clock mapping watch -> phone; null when sync quality was NONE
@@ -80,10 +79,12 @@ object WristAnalysis {
         }
 
         // Map watch monotonic nanos -> phone session seconds.
+        // Clip to phone session window [0, durationSeconds] to prevent
+        // delayed watch-stop data from contaminating metrics.
         val mapped = samples.mapNotNull { s ->
             val phoneNanos = fit.phoneFromWatch(s.timestampNanos)
             val t = (phoneNanos - phoneSessionStartNanos) / 1e9
-            if (t < 0) null else Telemetry.Point(t, s.x)
+            if (t < 0 || t > durationSeconds) null else Telemetry.Point(t, s.x)
         }.sortedBy { it.t }
         if (mapped.size < MIN_SAMPLES) {
             return Result(2, emptyList(), 0.0, 0, emptyList(), 1.0, "Mapped samples fell outside the session timeline")
@@ -103,7 +104,8 @@ object WristAnalysis {
         for (i in samples.indices) {
             val phoneNanos = fit.phoneFromWatch(samples[i].timestampNanos)
             val t = (phoneNanos - phoneSessionStartNanos) / 1e9
-            if (t < 0) continue
+            // Clip to session window [0, durationSeconds]
+            if (t < 0 || t > durationSeconds) continue
             if (t - lastT > 0.25) gaps++
             points.add(Telemetry.Point(t, axisValues[i]))
             lastT = t
