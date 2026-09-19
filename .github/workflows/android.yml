@@ -1,4 +1,5 @@
 name: Android build and checks
+
 on:
   push:
     branches: [main]
@@ -30,11 +31,18 @@ jobs:
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Test, lint and assemble
-        run: gradle --no-daemon :core:check :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+        run: gradle --no-daemon :core:check :protocol:test :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest :wear:lintDebug :wear:assembleDebug
       - uses: actions/upload-artifact@v7
+        name: Upload phone debug APK
         with:
           name: pocket-pitwall-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        name: Upload wear debug APK
+        with:
+          name: pocket-pitwall-wear-debug-apk
+          path: wear/build/outputs/apk/debug/wear-debug.apk
           if-no-files-found: error
       - name: Enable emulator acceleration
         run: |
@@ -52,6 +60,7 @@ jobs:
           script: ./scripts/test-android.sh
       - uses: actions/upload-artifact@v7
         if: always()
+        name: Upload UI test results
         with:
           name: android-ui-results
           path: |
@@ -60,7 +69,10 @@ jobs:
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
         if: always()
+        name: Upload lint report
         with:
           name: lint-report
-          path: app/build/reports/lint-results-debug.html
+          path: |
+            app/build/reports/lint-results-debug.html
+            wear/build/reports/lint-results-debug.html
           if-no-files-found: ignore
