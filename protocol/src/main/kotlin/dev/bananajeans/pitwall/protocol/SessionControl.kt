@@ -39,6 +39,11 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
         private set
     private var pendingSince: Long = 0
 
+    /** The expected start sequence number for the current/next start command. */
+    private var expectedStartSeq: Long = 0
+    /** The expected stop sequence number for the current/next stop command. */
+    private var expectedStopSeq: Long = 0
+
     val snapshot: Snapshot
         get() = Snapshot(
             sessionId, state, startSeq, stopSeq,
@@ -60,6 +65,7 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
         }
         this.sessionId = sessionId
         startSeq += 1
+        expectedStartSeq = startSeq
         state = CommandState.PENDING_START
         pendingSince = now()
         return Messages.Start(sessionId, title, direction, System.currentTimeMillis(), startSeq)
@@ -85,6 +91,13 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
         pendingSince = 0
     }
 
+    /** The Stop message to (re)send for the current pending/active session. */
+    fun stopMessage(): Messages.Stop? {
+        val sid = sessionId ?: return null
+        if (state != CommandState.PENDING_STOP && state != CommandState.STOPPED) return null
+        return Messages.Stop(sid, stopSeq)
+    }
+
     /** Returns the [Messages.Stop] to send, or null when stop already in flight. */
     fun stop(): Messages.Stop? {
         val sid = sessionId ?: return null
@@ -93,6 +106,7 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
             // Start never acked; treat as aborted rather than recorded.
         }
         stopSeq += 1
+        expectedStopSeq = stopSeq
         state = CommandState.PENDING_STOP
         pendingSince = now()
         return Messages.Stop(sid, stopSeq)
@@ -101,6 +115,11 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
     fun onStopAck(ack: Messages.StopAck) {
         if (ack.sessionId != sessionId) return
         if (state != CommandState.PENDING_STOP) return
+        // Only transition to STOPPED when the watch actually finalized the log.
+        if (!ack.finalized) {
+            // Finalization failed; stay in PENDING_STOP so the phone can retry.
+            return
+        }
         state = CommandState.STOPPED
         pendingSince = 0
     }
@@ -111,6 +130,8 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
         state = CommandState.IDLE
         startSeq = 0
         stopSeq = 0
+        expectedStartSeq = 0
+        expectedStopSeq = 0
         pendingSince = 0
     }
 }
@@ -122,7 +143,7 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
  */
 class WatchSessionControl {
 
-    private val handledStarts = LinkedHashMap<String, Long>() // sid -> last seq
+    private val handledStarts = LinkedHashMap<String, Long>() // sid -> max seq seen
     private val handledStops = LinkedHashMap<String, Long>()
 
     /**
@@ -130,18 +151,26 @@ class WatchSessionControl {
      * recorder); false when it is a retry (only re-ack).
      */
     fun shouldStart(sid: String, seq: Long): Boolean {
-        val previous = handledStarts[sid]
+        val previous = handledStarts[sid] ?: Long.MIN_VALUE
+        if (seq <= previous) {
+            // Duplicate or reordered old packet - don't re-execute, just re-ack
+            return false
+        }
         handledStarts[sid] = seq
         trim(handledStarts)
-        return previous == null || seq > previous
+        return true
     }
 
     /** Same for stops. */
     fun shouldStop(sid: String, seq: Long): Boolean {
-        val previous = handledStops[sid]
+        val previous = handledStops[sid] ?: Long.MIN_VALUE
+        if (seq <= previous) {
+            // Duplicate or reordered old packet - don't re-execute, just re-ack
+            return false
+        }
         handledStops[sid] = seq
         trim(handledStops)
-        return previous == null || seq > previous
+        return true
     }
 
     private fun trim(map: LinkedHashMap<String, Long>) {

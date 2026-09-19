@@ -205,6 +205,8 @@ class RecorderService : Service(), SensorEventListener {
             handler.postDelayed({ finish(complete = true) }, MAX_SESSION_MILLIS)
         } catch (e: Exception) {
             update { it.copy(error = e.message ?: "Recording failed", recording = false, healthy = false) }
+            // Ensure callback is triggered on failure so the phone gets StartAck(recording=false)
+            sessionId?.let { triggerRecordingCallback(it, false) }
             finish(complete = false)
         }
     }

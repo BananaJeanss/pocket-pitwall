@@ -155,7 +155,7 @@ object WatchLink {
         try {
             val message = synchronized(control) { control.start(sessionId, title, direction) }
             if (message != null) {
-                sendWithRetry(message, maxAttempts = 3, baseDelayMs = 500)
+                sendWithRetry(message, maxAttempts = 10, baseDelayMs = 500)
             }
             publishControl()
         } catch (_: IllegalStateException) {
@@ -177,7 +177,7 @@ object WatchLink {
         try {
             val message = synchronized(control) { control.stop() }
             if (message != null) {
-                sendWithRetry(message, maxAttempts = 3, baseDelayMs = 500)
+                sendWithRetry(message, maxAttempts = 10, baseDelayMs = 500)
             }
             publishControl()
         } catch (_: Exception) {
@@ -185,19 +185,39 @@ object WatchLink {
     }
 
     /**
-     * Sends a message with exponential backoff retry. For control messages
-     * (Start/Stop) where the watch's idempotent state machine handles duplicates,
-     * we can safely retry on send failure without side effects.
+     * Sends a message with exponential backoff retry until a matching application
+     * ACK is received. For control messages (Start/Stop) where the watch's
+     * idempotent state machine handles duplicates, we can safely retry on send
+     * failure or missing ACK without side effects.
      */
-    private fun sendWithRetry(message: Messages.Message, maxAttempts: Int = 3, baseDelayMs: Long = 500) {
+    private fun sendWithRetry(message: Messages.Message, maxAttempts: Int = 10, baseDelayMs: Long = 500) {
         scope.launch {
             var attempt = 0
             while (attempt < maxAttempts) {
+                // Check if we already have the matching ACK
+                val snap = synchronized(control) { control.snapshot }
+                when (message) {
+                    is Messages.Start -> {
+                        if (snap.state == SessionControl.CommandState.RECORDING && snap.startSeq == message.startSeq) {
+                            return@launch // Got the ACK we were waiting for
+                        }
+                    }
+                    is Messages.Stop -> {
+                        if (snap.state == SessionControl.CommandState.STOPPED && snap.stopSeq == message.stopSeq) {
+                            return@launch // Got the ACK we were waiting for
+                        }
+                    }
+                    else -> {} // Other message types don't have ACKs we wait for here
+                }
+
+                // Not yet acked - try to send
                 val success = sendBlocking(message)
-                if (success) return@launch
+                if (!success) {
+                    // Send failed at transport level - will retry
+                }
                 attempt++
                 if (attempt < maxAttempts) {
-                    val delay = baseDelayMs * (1L shl (attempt - 1)) // 500, 1000, 2000...
+                    val delay = baseDelayMs * (1L shl (attempt - 1)).coerceAtMost(10_000) // cap at 10s
                     kotlinx.coroutines.delay(delay)
                 }
             }

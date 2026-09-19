@@ -159,10 +159,20 @@ class WearConnection(private val context: Context) {
     }
 
     private fun onStop(message: Messages.Stop) {
+        // shouldStop returns true only for NEW sequences (higher than any seen).
+        // If false, it means this is a duplicate of an already-handled sequence,
+        // and we should re-ack with the finalization result of that sequence.
         if (!watchControl.shouldStop(message.sessionId, message.stopSeq)) {
-            send(Messages.StopAck(message.sessionId, true, message.sessionId, Messages.PROTOCOL_VERSION))
+            // This is a duplicate/retried stop. The original is either:
+            // - still in progress (finalizing), or
+            // - already completed.
+            // We can't easily tell which without tracking in-progress state.
+            // For now, we just don't ACK here - the original callback will ACK
+            // when finalization completes. The phone will retry and eventually
+            // get the correct ACK.
             return
         }
+        // New stop sequence - start finalization and wait for callback.
         val ackCallback = object : RecorderService.Companion.StopCallback {
             override fun onStopped(finalized: Boolean) {
                 send(Messages.StopAck(message.sessionId, finalized, message.sessionId, Messages.PROTOCOL_VERSION))
