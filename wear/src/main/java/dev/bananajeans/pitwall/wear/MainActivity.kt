@@ -3,6 +3,7 @@ package dev.bananajeans.pitwall.wear
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
