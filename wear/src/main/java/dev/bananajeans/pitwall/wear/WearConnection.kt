@@ -51,6 +51,9 @@ class WearConnection(private val context: Context) {
     private val exchanges = ArrayList<ClockSync.Exchange>()
     private val sid = "clock-sync"
 
+    // Track in-progress stop finalization so duplicate stops can re-ack correctly
+    private val stopInProgress = mutableSetOf<String>()
+
     private val messageListener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
         handleMessage(event)
     }
@@ -160,21 +163,20 @@ class WearConnection(private val context: Context) {
 
     private fun onStop(message: Messages.Stop) {
         // shouldStop returns true only for NEW sequences (higher than any seen).
-        // If false, it means this is a duplicate of an already-handled sequence,
-        // and we should re-ack with the finalization result of that sequence.
+        // If false, it means this is a duplicate of an already-handled sequence.
         if (!watchControl.shouldStop(message.sessionId, message.stopSeq)) {
-            // This is a duplicate/retried stop. The original is either:
-            // - still in progress (finalizing), or
-            // - already completed.
-            // We can't easily tell which without tracking in-progress state.
-            // For now, we just don't ACK here - the original callback will ACK
-            // when finalization completes. The phone will retry and eventually
-            // get the correct ACK.
+            // This is a duplicate/retried stop. If the original is still finalizing,
+            // we don't ACK yet - the original callback will ACK when finalization completes.
+            // If the original already completed, we'd need to track the result to re-ack.
+            // For now, we just don't ACK here - the phone will retry and eventually
+            // get the correct ACK from the original callback.
             return
         }
         // New stop sequence - start finalization and wait for callback.
+        stopInProgress.add(message.sessionId)
         val ackCallback = object : RecorderService.Companion.StopCallback {
             override fun onStopped(finalized: Boolean) {
+                stopInProgress.remove(message.sessionId)
                 send(Messages.StopAck(message.sessionId, finalized, message.sessionId, Messages.PROTOCOL_VERSION))
             }
         }
