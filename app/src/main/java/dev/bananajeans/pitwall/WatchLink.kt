@@ -173,7 +173,7 @@ object WatchLink {
     }
 
     /** Called when a phone recording stops. Same never-fail contract. */
-    fun onPhoneSessionStopped(sessionId: String) {
+    fun onPhoneSessionStopped(sessionId: String, context: Context) {
         try {
             val message = synchronized(control) { control.stop() }
             if (message != null) {
@@ -182,6 +182,8 @@ object WatchLink {
             publishControl()
         } catch (_: Exception) {
         }
+        // Pull any newly finalized watch log after our session stops.
+        WatchTransferManager(context.applicationContext).pullAfterSessionStop()
     }
 
     /**

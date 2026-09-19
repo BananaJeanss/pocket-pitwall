@@ -124,7 +124,7 @@ class RecorderService : Service(), SensorEventListener {
                 }
             }
             // Tell the watch to finalize its log and queue the transfer.
-            WatchLink.onPhoneSessionStopped(finished.id)
+            WatchLink.onPhoneSessionStopped(finished.id, applicationContext)
         }
 
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
