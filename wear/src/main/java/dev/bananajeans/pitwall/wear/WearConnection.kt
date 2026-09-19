@@ -160,7 +160,7 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
     private fun onStart(message: Messages.Start) {
         // Check if this is a new start command or a duplicate/retry
         val isNew = watchControl.shouldStart(message.sessionId, message.startSeq)
-        
+
         if (!isNew) {
             // Duplicate: replay the actual cached result if available
             val result = watchControl.getStartResult(message.sessionId, message.startSeq)
@@ -207,14 +207,14 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
             .putExtra(RecorderService.EXTRA_SESSION_ID, message.sessionId)
             .putExtra(RecorderService.EXTRA_TITLE, message.title)
             .putExtra(RecorderService.EXTRA_DIRECTION, message.direction)
-        
+
         val ackCallback = object : RecorderService.Companion.RecordingCallback {
             override fun onRecordingStarted(success: Boolean) {
                 watchControl.onStartCompleted(
-                    message.sessionId, 
-                    message.startSeq, 
-                    success, 
-                    BuildConfig.VERSION_NAME, 
+                    message.sessionId,
+                    message.startSeq,
+                    success,
+                    BuildConfig.VERSION_NAME,
                     Messages.PROTOCOL_VERSION
                 )
                 send(Messages.StartAck(message.sessionId, success, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
