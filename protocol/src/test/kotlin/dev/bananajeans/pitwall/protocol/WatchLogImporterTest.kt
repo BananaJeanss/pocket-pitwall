@@ -13,7 +13,7 @@ class WatchLogImporterTest {
 
     @get:Rule val tmp = TemporaryFolder()
 
-    private fun buildLog(sessionId: String, samples: Int = 5, finalize: Boolean = true): ByteArray {
+    private fun buildLog(sessionId: String, samples: Int = 5, finalize: Boolean = true, formatVersion: Int = 2): ByteArray {
         val out = ByteArrayOutputStream()
         val metadata = WatchLogCodec.Metadata(
             sessionId = sessionId,
@@ -22,7 +22,9 @@ class WatchLogImporterTest {
             startedAtWallMillis = 1730000000000L,
             startedAtMonotonicNanos = 10_000_000_000L,
             sensorInfo = emptyList(),
-            protocolVersion = 1
+            protocolVersion = 1,
+            expectedByteLength = null,
+            contentHash = null
         )
         val writer = WatchLogCodec.Writer(out, metadata)
         for (i in 0 until samples) {
