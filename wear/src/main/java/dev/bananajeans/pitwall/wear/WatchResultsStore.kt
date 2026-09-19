@@ -31,7 +31,9 @@ object WatchResultsStore {
             "peakHr" to (result.peakHr?.let { PitwallJson.n(it.toLong()) } ?: PitwallJson.Value.Null),
             "avgHr" to (result.averageHr?.let { PitwallJson.n(it.toLong()) } ?: PitwallJson.Value.Null),
             "quality" to (result.watchDataQuality?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null),
-            "notes" to (result.notes?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null)
+            "notes" to (result.notes?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null),
+            // Store result timestamp for chronological sorting
+            "timestamp" to PitwallJson.n(System.currentTimeMillis())
         )
         val atomic = AtomicFile(File(dir(context), "${result.sessionId}.json"))
         val stream = atomic.startWrite()
@@ -63,7 +65,12 @@ object WatchResultsStore {
                     )
                 }.getOrNull()
             }
-            .sortedByDescending { it.sessionId }
+            // Sort by stored timestamp (newest first), fall back to file lastModified
+            .sortedByDescending { result ->
+                val file = File(dir(context), "${result.sessionId}.json")
+                val obj = try { PitwallJson.parse(file.readText()) as PitwallJson.Value.Object } catch (_: Exception) { return@sortedByDescending 0L }
+                obj.number("timestamp")?.toLong() ?: file.lastModified()
+            }
 
     fun latest(context: Context): Messages.Result? = list(context).firstOrNull()
 

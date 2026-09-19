@@ -78,7 +78,7 @@ private fun WatchApp() {
     var results by remember { mutableStateOf(WatchResultsStore.list(context)) }
     var showResult by remember { mutableStateOf(false) }
 
-    // Cheap polling keeps the small UI honest without recomposition storms.
+    // Poll for state changes and refresh results when connection state changes
     DisposableEffect(Unit) {
         val app = context.applicationContext as PitwallWatchApplication
         val thread = Thread {
@@ -91,14 +91,16 @@ private fun WatchApp() {
         onDispose { thread.interrupt() }
     }
 
+    // Refresh pending count when not recording (also re-read when transfer completes)
     if (pending < 0 || !status.recording) {
         val store = remember { WatchLogStore(context) }
-        val count = remember(status.recording) { store.pendingTransfer().size }
+        val count = remember(status.recording, connection.phoneConnected) { store.pendingTransfer().size }
         if (count != pending) pending = count
     }
-    // Refresh results when not recording (cheap; disk-backed).
-    if (!status.recording && results.isEmpty()) {
-        results = WatchResultsStore.list(context)
+    // Refresh results when a new result arrives (poll disk, it's small and cached)
+    if (!status.recording) {
+        val fresh = WatchResultsStore.list(context)
+        if (fresh != results) results = fresh
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -209,8 +211,9 @@ private fun ResultPanel(result: dev.bananajeans.pitwall.protocol.Messages.Result
         Text("Best lap ${formatSeconds(it)}", color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center)
     }
     Text("${result.lapCount} ${if (result.lapCount == 1) "lap" else "laps"}", textAlign = TextAlign.Center)
-    result.steeringSmoothness?.let {
-        Text("Steering smoothness ${"%d%%".format((it * 100).toInt().coerceIn(0, 100))}", textAlign = TextAlign.Center)
+    result.steeringSmoothness?.let { smooth ->
+        val pct = (smooth * 100).toInt().coerceIn(0, 100)
+        Text("Steering smoothness ${pct}%", textAlign = TextAlign.Center)
     }
     result.correctionCount?.let { Text("$it corrections", textAlign = TextAlign.Center) }
     if (result.peakHr != null || result.averageHr != null) {
@@ -219,9 +222,18 @@ private fun ResultPanel(result: dev.bananajeans.pitwall.protocol.Messages.Result
             textAlign = TextAlign.Center
         )
     }
-    result.watchDataQuality?.takeIf { it != "ok" }?.let {
+    result.watchDataQuality?.takeIf { it != "ok" }?.let { quality ->
         Text(
-            "Watch data: $it",
+            "Watch data: $quality",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.Center
+        )
+    }
+    // Show notes (especially incomplete-log warnings)
+    result.notes?.takeIf { it.isNotBlank() }?.let { note ->
+        Text(
+            note,
             color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.labelSmall,
             textAlign = TextAlign.Center
