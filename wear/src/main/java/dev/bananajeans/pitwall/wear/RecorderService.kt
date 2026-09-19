@@ -73,7 +73,7 @@ class RecorderService : Service(), SensorEventListener {
     private var wake: PowerManager.WakeLock? = null
     private var sessionId: String? = null
     private var startedAtNanos = 0L
-    private var lastFlushNanos = 0L
+    private val lastFlushNanos = HashMap<Int, Long>()
     private val pending = HashMap<Int, ArrayList<WatchLogCodec.Sample>>()
     private var closing = false
 
@@ -119,7 +119,7 @@ class RecorderService : Service(), SensorEventListener {
 
             this.sessionId = sessionId
             startedAtNanos = SystemClock.elapsedRealtimeNanos()
-            lastFlushNanos = startedAtNanos
+            lastFlushNanos.clear()
             store.startRecording(sessionId)
             val metadata = WatchLogCodec.Metadata(
                 sessionId = sessionId,
@@ -139,13 +139,19 @@ class RecorderService : Service(), SensorEventListener {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Pitwall:watch-recording")
                 .apply { acquire(MAX_SESSION_MILLIS + 60_000) }
 
-            var registered = 0
+            var registeredAccel = false
+            var registeredGyro = false
             for ((candidate, probed) in probes) {
                 val sensor = probed.sensor ?: continue
                 val period = if (probed.chosenPeriodMicros > 0) probed.chosenPeriodMicros else SensorManager.SENSOR_DELAY_FASTEST
-                if (manager.registerListener(this, sensor, period, handler)) registered++
+                if (manager.registerListener(this, sensor, period, handler)) {
+                    when (sensor.type) {
+                        Sensor.TYPE_ACCELEROMETER -> registeredAccel = true
+                        Sensor.TYPE_GYROSCOPE -> registeredGyro = true
+                    }
+                }
             }
-            require(registered >= 2) { "Could not register any IMU sensor" }
+            require(registeredAccel && registeredGyro) { "Required IMU sensors (accelerometer and gyroscope) failed to register" }
 
             update { it.copy(sessionId = sessionId, recording = true, healthy = true, samples = 0, elapsedSeconds = 0.0, error = null) }
 
@@ -213,8 +219,9 @@ class RecorderService : Service(), SensorEventListener {
                 accuracy = event.accuracy
             )
         )
-        if (batch.size >= MAX_PENDING_PER_SENSOR || event.timestamp - lastFlushNanos >= FLUSH_INTERVAL_NANOS) {
-            flush(sensorType = event.sensor.type)
+        val st = event.sensor.type
+        if (batch.size >= MAX_PENDING_PER_SENSOR || event.timestamp - lastFlushNanos.getOrPut(st) { startedAtNanos } >= FLUSH_INTERVAL_NANOS) {
+            flush(sensorType = st)
         }
     }
 
@@ -237,7 +244,7 @@ class RecorderService : Service(), SensorEventListener {
         try {
             writer?.appendSamples(sensorType, batch)
             stream?.fd?.sync()
-            lastFlushNanos = SystemClock.elapsedRealtimeNanos()
+            lastFlushNanos[sensorType] = SystemClock.elapsedRealtimeNanos()
             update { it.copy(samples = it.samples + batch.size) }
         } catch (e: Exception) {
             update { it.copy(healthy = false, error = "Logging interrupted: ${e.message}") }
