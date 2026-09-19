@@ -118,6 +118,7 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
         // Only transition to STOPPED when the watch actually finalized the log.
         if (!ack.finalized) {
             // Finalization failed; stay in PENDING_STOP so the phone can retry.
+            // The watch may send a subsequent StopAck with finalized=true if it retries.
             return
         }
         state = CommandState.STOPPED
@@ -156,7 +157,7 @@ class WatchSessionControl {
             // Duplicate or reordered old packet - don't re-execute, just re-ack
             return false
         }
-        handledStarts[sid] = seq
+        handledStarts[sid] = maxOf(previous, seq)
         trim(handledStarts)
         return true
     }
@@ -168,7 +169,7 @@ class WatchSessionControl {
             // Duplicate or reordered old packet - don't re-execute, just re-ack
             return false
         }
-        handledStops[sid] = seq
+        handledStops[sid] = maxOf(previous, seq)
         trim(handledStops)
         return true
     }
