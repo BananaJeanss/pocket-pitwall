@@ -27,7 +27,7 @@ import kotlinx.coroutines.tasks.await
  * Process-scoped singleton: exactly one ChannelClient callback registered
  * for the lifetime of the phone app process.
  */
-class WatchTransferManager(private val context: Context) {
+class WatchTransferManager private constructor(private val context: Context) {
 
     data class TransferState(
         /** Session ids currently being received. */
@@ -295,6 +295,19 @@ class WatchTransferManager(private val context: Context) {
     /** Phone tells the watch to send its pending logs. */
     companion object {
         const val PATH_PULL = "/pitwall/log/pull"
+
+        /**
+         * True process-scoped owner (issue #21 P1): one instance per app
+         * process, created with the APPLICATION context, so Activity
+         * recreation can never register a second ChannelClient callback or
+         * leak the old one. getInstance()/start() are idempotent.
+         */
+        @Volatile private var instance: WatchTransferManager? = null
+
+        fun getInstance(context: Context): WatchTransferManager =
+            instance ?: synchronized(this) {
+                instance ?: WatchTransferManager(context.applicationContext).also { instance = it }
+            }
     }
 }
 
