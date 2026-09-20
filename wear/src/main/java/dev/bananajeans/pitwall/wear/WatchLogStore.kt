@@ -56,6 +56,9 @@ class WatchLogStore(private val context: Context) {
 
     fun logFile(sessionId: String): File = File(folder(sessionId), "log.pwtch")
 
+    /** Out-of-band source metadata sidecar (issue #21 integrity). */
+    fun sourceMetaFile(sessionId: String): File = File(folder(sessionId), "source.meta")
+
     fun stateFile(sessionId: String): File = File(folder(sessionId), "state.json")
 
     fun isRecording(sessionId: String): Boolean = readState(sessionId)?.state == State.RECORDING
@@ -72,6 +75,43 @@ class WatchLogStore(private val context: Context) {
         val current = readState(sessionId)
         if (current?.state == State.IMPORTED) return // never downgrade
         writeState(sessionId, State.FINALIZED, complete)
+        writeSourceMeta(sessionId, complete)
+    }
+
+    /** Reads the durable source sidecar for a log, if one was written. */
+    fun sourceMeta(sessionId: String): WatchLogCodec.SourceMeta? {
+        if (!ID_PATTERN.matches(sessionId)) return null
+        val file = sourceMetaFile(sessionId)
+        if (!file.isFile) return null
+        return runCatching { WatchLogCodec.SourceMeta.parseJson(file.readText()) }.getOrNull()
+    }
+
+    /**
+     * Writes the out-of-band source metadata sidecar: expected byte length,
+     * streaming SHA-256 of the exact bytes on disk, and whether the source
+     * is complete (valid trailer). The phone uses this to accept a
+     * crash-recovered incomplete source while rejecting transport
+     * truncation (issue #21).
+     */
+    private fun writeSourceMeta(sessionId: String, complete: Boolean) {
+        val log = logFile(sessionId)
+        if (!log.isFile || log.length() == 0L) return
+        val meta = WatchLogCodec.SourceMeta(
+            sessionId = sessionId,
+            formatVersion = WatchLogCodec.FORMAT_VERSION,
+            expectedBytes = log.length(),
+            sha256 = WatchLogCodec.SourceMeta.sha256Hex(log),
+            complete = complete
+        )
+        val atomic = AtomicFile(sourceMetaFile(sessionId))
+        val stream = atomic.startWrite()
+        try {
+            stream.write(meta.encodeJson().toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(stream)
+        } catch (e: Exception) {
+            atomic.failWrite(stream)
+            throw e
+        }
     }
 
     fun markImported(sessionId: String) {
@@ -146,6 +186,18 @@ class WatchLogStore(private val context: Context) {
                 // incomplete finalized log rather than losing it.
                 markFinalized(entry.sessionId, complete = false)
                 recoveredUnfinalized++
+            }
+            if (entry.state == State.FINALIZED) {
+                // Self-heal: a crash between markFinalized and the sidecar
+                // write (or a lost sidecar) must not strand a log without
+                // integrity metadata; recompute from the bytes on disk.
+                val log = logFile(entry.sessionId)
+                val meta = sourceMeta(entry.sessionId)
+                if (log.isFile && log.length() > 0L &&
+                    (meta == null || meta.expectedBytes != log.length())
+                ) {
+                    writeSourceMeta(entry.sessionId, entry.finalizedComplete)
+                }
             }
             if (entry.state == State.IMPORTED &&
                 System.currentTimeMillis() - entry.lastModified > IMPORTED_RETENTION_MS

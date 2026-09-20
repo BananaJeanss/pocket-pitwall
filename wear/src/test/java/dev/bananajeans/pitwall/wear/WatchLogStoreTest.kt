@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import dev.bananajeans.pitwall.protocol.WatchLogCodec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -62,6 +64,42 @@ class WatchLogStoreTest {
         store.markImported("sess-a")
         assertEquals(WatchLogStore.State.IMPORTED, store.list().first().state)
         assertTrue(store.pendingTransfer().none { it.sessionId == "sess-a" })
+    }
+
+    @Test
+    fun finalizeWritesSourceSidecarMatchingFile() {
+        val log = writeSampleLog("sess-meta", finalize = true)
+        val meta = requireNotNull(store.sourceMeta("sess-meta")) { "sidecar missing" }
+        assertEquals("sess-meta", meta.sessionId)
+        assertEquals(WatchLogCodec.FORMAT_VERSION, meta.formatVersion)
+        assertTrue(meta.complete)
+        assertEquals(log.length(), meta.expectedBytes)
+        assertEquals(WatchLogCodec.SourceMeta.sha256Hex(log), meta.sha256)
+    }
+
+    @Test
+    fun crashRecoveryWritesIncompleteSourceSidecar() {
+        // Crash before finalize: writer closed without a trailer.
+        val log = writeSampleLog("sess-crash", finalize = false)
+        val meta = requireNotNull(store.sourceMeta("sess-crash")) { "sidecar missing" }
+        assertFalse(meta.complete)
+        assertEquals(log.length(), meta.expectedBytes)
+        assertEquals(WatchLogCodec.SourceMeta.sha256Hex(log), meta.sha256)
+    }
+
+    @Test
+    fun recoverSelfHealsMissingSidecar() {
+        val log = writeSampleLog("sess-heal", finalize = true)
+        // Simulate a crash between finalize and the sidecar write.
+        assertTrue(store.sourceMetaFile("sess-heal").delete())
+        assertNull(store.sourceMeta("sess-heal"))
+
+        store.recover()
+
+        val meta = requireNotNull(store.sourceMeta("sess-heal")) { "sidecar missing after self-heal" }
+        assertTrue(meta.complete)
+        assertEquals(log.length(), meta.expectedBytes)
+        assertEquals(WatchLogCodec.SourceMeta.sha256Hex(log), meta.sha256)
     }
 
     @Test
