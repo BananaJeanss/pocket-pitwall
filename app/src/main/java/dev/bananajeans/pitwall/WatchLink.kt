@@ -47,6 +47,10 @@ object WatchLink {
     private val state = AtomicReference(State())
     val currentState: State get() = state.get()
 
+    /** Fits captured per session id at session start (issue #22 P0/P1):
+     *  import/analysis must use THIS session's fit, never a global latest. */
+    private val sessionFits = HashMap<String, ClockSync.Fit>()
+
     private lateinit var messageClient: MessageClient
     private lateinit var nodeClient: NodeClient
     private val control = SessionControl()
@@ -169,6 +173,20 @@ object WatchLink {
                 send(Messages.SyncPing(sessionId, t1))
                 kotlinx.coroutines.delay(250)
             }
+            // Freeze the fit for THIS session once the extra anchors land:
+            // later pings may still refine the global fit, but this session's
+            // analysis must use the fit from its own recording window.
+            kotlinx.coroutines.delay(1500)
+            val frozen = state.get().lastSyncFit
+            if (frozen != null) {
+                synchronized(sessionFits) {
+                    sessionFits[sessionId] = frozen
+                    if (sessionFits.size > 32) {
+                        val oldest = sessionFits.keys.first()
+                        sessionFits.remove(oldest)
+                    }
+                }
+            }
         }
     }
 
@@ -250,8 +268,16 @@ object WatchLink {
     /**
      * Persisted sync snapshot for this session, captured at stop time so the
      * importer can align watch samples to the phone timeline (layer 5).
+     * With a sessionId, returns the fit frozen for that session at start;
+     * without, the latest global fit (legacy behavior for callers without
+     * session context).
      */
-    fun captureSyncForSession(): ClockSync.Fit? = state.get().lastSyncFit
+    fun captureSyncForSession(sessionId: String? = null): ClockSync.Fit? {
+        if (sessionId != null) {
+            synchronized(sessionFits) { sessionFits[sessionId] }?.let { return it }
+        }
+        return state.get().lastSyncFit
+    }
 
     /** Send the compact post-session summary (issue #25/#19 result message). */
     fun sendResult(result: Messages.Result) {

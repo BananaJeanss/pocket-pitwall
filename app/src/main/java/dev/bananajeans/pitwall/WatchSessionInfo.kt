@@ -23,6 +23,9 @@ data class WatchSessionInfo(
     val sensorRates: Map<Int, Double>,
     /** Clock mapping used to align this stream to the phone timeline. */
     val sync: Sync?,
+    /** Phone monotonic clock (elapsedRealtimeNanos) anchor persisted at
+     *  import: the exact per-session base the analysis must subtract. */
+    val phoneStartNanos: Long?,
     /** Log file name inside the session folder (null until imported). */
     val logFile: String?,
     /** Derived watch metrics (layer 6 writes these). */
@@ -75,6 +78,7 @@ data class WatchSessionInfo(
             "complete" to PitwallJson.b(logComplete),
             "samples" to PitwallJson.n(sampleCount),
             "rates" to PitwallJson.Value.Array(rates),
+            "phoneStartNanos" to (phoneStartNanos?.let { PitwallJson.n(it) } ?: PitwallJson.Value.Null),
             "sync" to sync,
             "logFile" to (logFile?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null),
             "metrics" to metrics
@@ -136,6 +140,7 @@ data class WatchSessionInfo(
                         quality = quality
                     )
                 },
+                phoneStartNanos = obj.number("phoneStartNanos")?.toLong(),
                 logFile = obj.string("logFile"),
                 metrics = metrics
             )

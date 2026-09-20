@@ -18,6 +18,8 @@ import kotlin.math.sqrt
 data class Session(
     val id: String = UUID.randomUUID().toString(),
     val created: Long = System.currentTimeMillis(),
+    /** Phone monotonic clock (SystemClock.elapsedRealtimeNanos) at recording start. */
+    val phoneStartElapsedNanos: Long = 0L,
     val title: String = "Motorcity · Underground",
     val direction: String = "Normal",
     val status: String = "recording",
@@ -32,6 +34,7 @@ data class Session(
     val watch: WatchSessionInfo? = null
 ) {
     fun json(): JSONObject = JSONObject().put("schemaVersion", 1).put("id", id).put("created", created)
+        .put("phoneStartElapsedNanos", phoneStartElapsedNanos)
         .put("title", title).put("direction", direction).put("status", status).put("duration", duration)
         .put("lengthMeters", length).put("sensors", sensors).put("notes", notes)
         .put("marks", JSONArray().apply { marks.forEach { put(JSONObject().put("seconds", it.t).put("kind", it.kind).put("estimated", it.estimated)) } })
@@ -75,6 +78,7 @@ class SessionStore(context: Context) {
         return Session(
             id=id,
             created=j.getLong("created"),
+            phoneStartElapsedNanos=j.optLong("phoneStartElapsedNanos", 0L),
             title=j.getString("title"),
             direction=j.optString("direction", "Normal"),
             status=j.optString("status", "complete"),
