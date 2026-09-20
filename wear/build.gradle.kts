@@ -54,6 +54,7 @@ dependencies {
     implementation(project(":protocol"))
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.wear:wear-ongoing:1.1.0")
     implementation("androidx.wear.compose:compose-material3:1.5.4")
     implementation("androidx.wear.compose:compose-foundation:1.5.4")
     implementation("androidx.wear.compose:compose-ui-tooling:1.5.4")

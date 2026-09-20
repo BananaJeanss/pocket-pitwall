@@ -255,14 +255,32 @@ class RecorderService : Service(), SensorEventListener {
             this, 1, Intent(this, RecorderService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = Notification.Builder(this, "recording")
+        val builder = androidx.core.app.NotificationCompat.Builder(this, "recording")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("Pitwall recording")
             .setContentText("Wrist telemetry · 1 hour limit")
             .setContentIntent(open)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "Stop", stop).build())
-            .build()
+            // Live elapsed time in the shade/notification stream.
+            .setUsesChronometer(true)
+            .setWhen(System.currentTimeMillis())
+            .addAction(
+                androidx.core.app.NotificationCompat.Action.Builder(null, "Stop", stop).build()
+            )
+        // Maps-style tiny activity chip on the watch face (Ongoing Activity API).
+        // Tapping it opens the app; the chip disappears when this notification
+        // is removed on stop. Static icon only, and failures are cosmetic —
+        // recording must never fail because of the chip.
+        try {
+            androidx.wear.ongoing.OngoingActivity.Builder(this, 1, builder)
+                .setStaticIcon(android.R.drawable.ic_media_play)
+                .setTouchIntent(open)
+                .build()
+                .apply(this)
+        } catch (_: Exception) {
+            // Chip is cosmetic.
+        }
+        val notification = builder.build()
         if (Build.VERSION.SDK_INT >= 30) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
