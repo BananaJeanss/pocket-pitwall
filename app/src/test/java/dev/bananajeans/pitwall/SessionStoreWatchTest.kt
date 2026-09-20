@@ -54,6 +54,7 @@ class SessionStoreWatchTest {
             quality = ClockSync.Quality.EXCELLENT
         ),
         logFile = "watch.pwtch",
+        phoneStartNanos = 60_000_000_000L,
         metrics = null
     )
 
