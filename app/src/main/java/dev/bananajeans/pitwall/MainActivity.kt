@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         SessionRepository.initialize(applicationContext)
         WatchLink.initialize(applicationContext)
-        transferManager = WatchTransferManager.getInstance(this)
+        transferManager = WatchTransferManager(this)
         transferManager.start()
         transferManager.pullPending()
         setContent {
