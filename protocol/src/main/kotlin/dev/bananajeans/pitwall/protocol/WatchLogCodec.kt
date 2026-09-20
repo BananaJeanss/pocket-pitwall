@@ -159,7 +159,6 @@ public object WatchLogCodec {
             }
         }
     }
-rt to streaming reader)
 
     /** Watch log metadata, stored as JSON in the header. */
     public data class Metadata(
