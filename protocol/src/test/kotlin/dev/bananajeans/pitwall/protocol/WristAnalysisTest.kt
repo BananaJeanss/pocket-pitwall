@@ -69,6 +69,56 @@ class WristAnalysisTest {
     }
 
     @Test
+    fun clockDomainMismatchStillAlignsValidSamples() {
+        // P0 regression (issue #22): phone and watch monotonic clocks have
+        // DELIBERATELY different offsets. The watch booted 10 days before the
+        // phone, so watch monotonic time is far larger than phone time. The
+        // only correct path is: map each sample through the FIT into the
+        // phone domain, then subtract the phone session anchor.
+        val watchEpochOffset = 10L * 24 * 3600 * 1_000_000_000L // watch is 10 days "ahead"
+        val phoneSessionStart = 60_000_000_000L // phone monotonic: 60 s
+
+        // Watch samples start at watch-monotonic 10 days + 60 s (aligned to
+        // the phone session start through the fit below).
+        val watchSampleStart = watchEpochOffset + phoneSessionStart
+        // Fit: phone = watch - 10 days (offset watch-minus-phone = +10 days).
+        val bigFit = ClockSync.Fit(
+            offsetWatchMinusPhone = watchEpochOffset.toDouble(),
+            driftPerNano = 0.0,
+            bestRttNanos = 5_000_000.0,
+            medianRttNanos = 8_000_000.0,
+            residualRmsNanos = 100_000.0,
+            exchangesUsed = 10,
+            exchangesTotal = 10,
+            rttOutliersRejected = 0
+        )
+        val data = (0 until 1000).map { i ->
+            WatchLogCodec.Sample(
+                sensorType = 4,
+                timestampNanos = watchSampleStart + i * 10_000_000L, // 100 Hz
+                x = 0.01 * sin(i * 0.1),
+                y = 0.02 * sin(i * 0.05),
+                z = 0.5 * sin(2 * PI * i / 100.0),
+                w = 0.0,
+                accuracy = 3
+            )
+        }
+        // Passing the WATCH monotonic start as the phone anchor (the old
+        // bug) would map every sample ~10 days outside the window and clip
+        // everything; the correct anchor keeps them in.
+        val wrongAnchor = WristAnalysis.analyze(data, bigFit, 10.0, phoneSessionStartNanos = watchSampleStart)
+        assertTrue("old watch-epoch anchor must clip all samples") { !wrongAnchor.usable || wrongAnchor.steeringRate.isEmpty() }
+
+        val correct = WristAnalysis.analyze(data, bigFit, 10.0, phoneSessionStartNanos = phoneSessionStart)
+        assertTrue("correct phone anchor must keep samples usable") { correct.usable }
+        assertEquals(1000, correct.steeringRate.size)
+        // Sample 0 must map exactly to t=0 in the session timeline.
+        assertEquals(0.0, correct.steeringRate.first().t, 1e-6)
+        // Last sample lands at ~9.99 s inside the 10 s window.
+        assertTrue(correct.steeringRate.last().t in 9.9..10.0)
+    }
+
+    @Test
     fun picksDominantAxis() {
         // Z axis has strong steering signal; X/Y only tiny noise.
         val data = samples(1000, zSignal = { i, _ -> 0.8 * sin(i * 0.02) })

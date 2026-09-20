@@ -57,8 +57,7 @@ object WristAnalysis {
         val usable: Boolean get() = degradedReason == null
     }
 
-    /**
-     * Analyze a session's watch log.
+    /** Analyze a session's watch log.
      *
      * @param samples raw watch gyroscope samples (watch monotonic nanos)
      * @param fit clock mapping watch -> phone; null when sync quality was NONE
@@ -80,30 +79,43 @@ object WristAnalysis {
         }
 
         // Map watch monotonic nanos -> phone session seconds.
+        // Clip to phone session window [0, durationSeconds] to prevent
+        // delayed watch-stop data from contaminating metrics.
         val mapped = samples.mapNotNull { s ->
             val phoneNanos = fit.phoneFromWatch(s.timestampNanos)
             val t = (phoneNanos - phoneSessionStartNanos) / 1e9
-            if (t < 0) null else Telemetry.Point(t, s.x)
+            if (t < 0 || t > durationSeconds) null else Telemetry.Point(t, s.x)
         }.sortedBy { it.t }
         if (mapped.size < MIN_SAMPLES) {
             return Result(2, emptyList(), 0.0, 0, emptyList(), 1.0, "Mapped samples fell outside the session timeline")
         }
 
+        // Clip to the session window FIRST, then choose the steering axis
+        // from in-session data only: post-session motion (e.g. removing the
+        // watch) must never influence axis selection.
+        val inWindow = ArrayList<Pair<Int, Double>>(samples.size) // index -> t seconds
+        for (i in samples.indices) {
+            val phoneNanos = fit.phoneFromWatch(samples[i].timestampNanos)
+            val t = (phoneNanos - phoneSessionStartNanos) / 1e9
+            if (t < 0 || t > durationSeconds) continue
+            inWindow.add(i to t)
+        }
+        if (inWindow.size < MIN_SAMPLES) {
+            return Result(2, emptyList(), 0.0, 0, emptyList(), 1.0, "Mapped samples fell outside the session timeline")
+        }
+
         // Choose the axis with the highest variance as the steering axis
         // (wrist turning dominates the gyro trace around one axis).
-        val axis = pickAxis(samples)
+        val axis = pickAxis(inWindow.map { samples[it.first] })
         val axisValues = samples.map { sample ->
             when (axis) {
                 0 -> sample.x; 1 -> sample.y; else -> sample.z
             }
         }
-        val points = ArrayList<Telemetry.Point>(samples.size)
+        val points = ArrayList<Telemetry.Point>(inWindow.size)
         var lastT = Double.NEGATIVE_INFINITY
         var gaps = 0
-        for (i in samples.indices) {
-            val phoneNanos = fit.phoneFromWatch(samples[i].timestampNanos)
-            val t = (phoneNanos - phoneSessionStartNanos) / 1e9
-            if (t < 0) continue
+        for ((i, t) in inWindow) {
             if (t - lastT > 0.25) gaps++
             points.add(Telemetry.Point(t, axisValues[i]))
             lastT = t
