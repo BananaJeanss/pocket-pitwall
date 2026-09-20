@@ -1,5 +1,6 @@
 package dev.bananajeans.pitwall.protocol
 
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -14,7 +15,10 @@ import kotlin.math.roundToLong
  *  - written incrementally: complete frames are on disk as recording proceeds,
  *  - complete vs incomplete logs are distinguishable,
  *  - corrupt/truncated data is detected, never silently treated as complete,
- *  - raw monotonic timestamps survive without lossy resampling.
+ *  - raw monotonic timestamps survive without lossy resampling,
+ *  - readable as a stream: the reader never buffers the whole file (an
+ *    hour-long log is tens of MB; reading it via readBytes() risks OOM on
+ *    the phone).
  *
  * File layout (all integers little-endian):
  *
@@ -43,12 +47,19 @@ import kotlin.math.roundToLong
  * round(value * 1e6) clamped to i32 (saturates beyond ±2147.48, far outside
  * IMU ranges). Deltas are nanoseconds since the previous record of the same
  * sensor; the chain is seeded with the metadata's startedAtMonotonicNanos.
+ * Accuracy frames advance their sensor's chain too.
  *
  * Reading rules:
- *  - Valid trailer (magic + CRC + length) => COMPLETE log.
+ *  - Valid trailer (magic + CRC + length, at end of stream) => COMPLETE log.
  *  - Missing/bad trailer => INCOMPLETE: frames are recovered up to the first
  *    structurally invalid or CRC-failing frame. Consumers must surface this.
  *  - A frame CRC failure in an otherwise COMPLETE log is corruption and throws.
+ *
+ * Streaming: [read] consumes [input] frame by frame. Memory cost is the
+ * header (<= 64 KiB), one frame buffer (<= ~1.8 MiB for a max-size frame) and
+ * the decoded records. The trailer is recognized at a frame boundary only
+ * when the stream ends immediately after it, so a literal "PWEND" inside the
+ * payload is treated as data corruption, not as an early trailer.
  */
 public object WatchLogCodec {
 
@@ -56,7 +67,7 @@ public object WatchLogCodec {
     public const val MAGIC: String = "PWTCH"
     public const val TRAILER_MAGIC: String = "PWEND"
     private const val HEADER_FIXED: Int = 10
-    private const val TRAILER_SIZE: Int = 13
+    public const val TRAILER_SIZE: Int = 13  // 5 (magic) + 4 (payload CRC32) + 4 (payload length)
     public const val FRAME_FIXED_BYTES: Int = 10
     public const val SAMPLE_RECORD_BYTES: Int = 28
     private const val ACCURACY_RECORD_BYTES: Int = 9
@@ -64,6 +75,9 @@ public object WatchLogCodec {
     private const val FRAME_TYPE_ACCURACY: Int = 2
     private const val FLOAT_SCALE: Double = 1_000_000.0
     private const val MAX_METADATA_BYTES: Int = 64 * 1024
+    /** One sample frame can hold up to 0xFFFF records of 28 bytes. */
+    public const val MAX_FRAME_BYTES: Int = FRAME_FIXED_BYTES + 0xFFFF * SAMPLE_RECORD_BYTES
+    private const val TRAILER_FIXED: Int = 5 // the magic prefix length used for partial-EOF checks
 
     // ---- model ---------------------------------------------------------------
 
@@ -169,9 +183,10 @@ public object WatchLogCodec {
         /** Writes the trailer. The log is complete only after this. */
         public fun finish() {
             check(!finished) { "Writer already finished" }
+            require(payloadBytes <= Int.MAX_VALUE.toLong()) { "Payload exceeds 2 GiB" }
             out.write(TRAILER_MAGIC.toByteArray(Charsets.US_ASCII))
             writeU32(out, payloadCrc.value.toInt())
-            writeU32(out, payloadBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            writeU32(out, payloadBytes.toInt())
             out.flush()
             finished = true
         }
@@ -232,139 +247,193 @@ public object WatchLogCodec {
 
     // ---- reading ---------------------------------------------------------
 
-    /** Reads and validates a whole log from [input], consuming it. */
+    /** Reads and validates a whole log from [input], consuming it incrementally. */
     public fun read(input: InputStream): ReadResult {
-        val bytes = input.readBytes()
-        if (bytes.size < HEADER_FIXED) throw CorruptLogException("Log too short (${bytes.size} bytes)")
-        if (String(bytes, 0, 5, Charsets.US_ASCII) != MAGIC)
-            throw CorruptLogException("Not a PWTCH log")
-        val version = bytes[5].toInt() and 0xFF
-        if (version != FORMAT_VERSION)
-            throw CorruptLogException("Unsupported format version $version")
-        val headerLength = readU32(bytes, 6)
-        if (headerLength < HEADER_FIXED || headerLength > bytes.size)
-            throw CorruptLogException("Header length $headerLength outside file")
-        val metadata = decodeMetadata(bytes, HEADER_FIXED, headerLength - HEADER_FIXED)
-
-        val payloadStart = headerLength
-        val tailCandidate = bytes.size - TRAILER_SIZE
-        var complete = false
-        var payloadEnd = bytes.size
-        var incompleteReason: String? = "Log was not finalized"
-
-        if (tailCandidate >= payloadStart) {
-            val tailMagic = String(bytes, tailCandidate, 5, Charsets.US_ASCII)
-            if (tailMagic == TRAILER_MAGIC) {
-                payloadEnd = tailCandidate
-                val storedCrc = readU32(bytes, tailCandidate + 5)
-                val storedLen = readU32(bytes, tailCandidate + 9)
-                val payload = bytes.copyOfRange(payloadStart, payloadEnd)
-                val actualCrc = CRC32().apply { update(payload, 0, payload.size) }.value.toInt()
-                if (storedLen == payload.size && storedCrc == actualCrc) {
-                    complete = true
-                    incompleteReason = null
-                } else {
-                    incompleteReason = "Trailer checksum mismatch"
-                }
-            }
-        }
-
-        val (log, stoppedAt) = readFrames(bytes, payloadStart, payloadEnd, metadata, complete)
-        val reason = when {
-            complete && stoppedAt != null ->
-                throw CorruptLogException("Frame corruption at payload offset $stoppedAt despite valid trailer")
-            !complete && stoppedAt != null ->
-                "Stopped at payload offset $stoppedAt: ${incompleteReason ?: "truncated"}"
-            else -> incompleteReason
-        }
-        return if (complete) ReadResult.Complete(log)
-        else ReadResult.Incomplete(log.copy(incompleteReason = reason), reason ?: "incomplete")
-    }
-
-    /**
-     * Parses frames in [payloadStart, payloadEnd). Returns the log plus the
-     * payload offset where parsing stopped (non-null when data was cut short
-     * or a frame failed validation in an incomplete log).
-     */
-    private fun readFrames(
-        bytes: ByteArray,
-        payloadStart: Int,
-        payloadEnd: Int,
-        metadata: Metadata,
-        complete: Boolean
-    ): Pair<WatchLog, Int?> {
+        val header = readHeader(input)
         val samples = ArrayList<Sample>(1024)
         val accuracies = ArrayList<AccuracyEvent>()
         val lastTimestamps = HashMap<Int, Long>()
-        var pos = payloadStart
-        var stoppedAt: Int? = null
-        var sampleCount = 0
+        val payloadCrc = CRC32()
+        var payloadBytes = 0L
+        var pos = 0L
+        var stoppedAt: Long? = null
+        var trailerCrc: Int? = null
+        var trailerLen: Int? = null
+        var trailerAtEnd = false
 
-        while (pos < payloadEnd) {
-            val remaining = payloadEnd - pos
-            if (remaining < FRAME_FIXED_BYTES) { stoppedAt = pos; break }
-            if (bytes[pos].toInt() != 'F'.code) { stoppedAt = pos; break }
-            val frameType = bytes[pos + 1].toInt() and 0xFF
-            val count = readU16(bytes, pos + 2)
-            val sensorType = bytes[pos + 4].toInt() and 0xFF
+        val fixed = ByteArray(FRAME_FIXED_BYTES)
+        loop@ while (true) {
+            val headRead = readUpTo(input, fixed)
+            if (headRead <= 0) break // clean EOF: no trailer
+            if (headRead < FRAME_FIXED_BYTES) {
+                stoppedAt = pos
+                break
+            }
+            if (headRead < TRAILER_FIXED && matches(fixed, TRAILER_MAGIC, headRead)) {
+                // Partial trailer magic at EOF: truncated tail.
+                stoppedAt = pos
+                break
+            }
+            if (matches(fixed, TRAILER_MAGIC)) {
+                // Trailer candidate: valid only if it ends exactly at EOF.
+                val trailer = ByteArray(TRAILER_SIZE)
+                System.arraycopy(fixed, 0, trailer, 0, FRAME_FIXED_BYTES)
+                if (readUpTo(input, trailer, FRAME_FIXED_BYTES, TRAILER_SIZE - FRAME_FIXED_BYTES) < TRAILER_SIZE - FRAME_FIXED_BYTES) {
+                    stoppedAt = pos
+                    break
+                }
+                trailerCrc = readU32(trailer, 5)
+                trailerLen = readU32(trailer, 9)
+                trailerAtEnd = input.read() == -1
+                if (trailerAtEnd) break
+                // Mid-payload "PWEND" bytes: corruption, not a trailer.
+                stoppedAt = pos
+                trailerCrc = null
+                trailerLen = null
+                break
+            }
+            if (fixed[0].toInt() != 'F'.code) {
+                stoppedAt = pos
+                break
+            }
+            val frameType = fixed[1].toInt() and 0xFF
+            val count = readU16(fixed, 2)
             val recordSize = when (frameType) {
                 FRAME_TYPE_SAMPLES -> SAMPLE_RECORD_BYTES
                 FRAME_TYPE_ACCURACY -> ACCURACY_RECORD_BYTES
-                else -> { stoppedAt = pos; break }
+                else -> { stoppedAt = pos; break@loop }
             }
-            val frameLength = FRAME_FIXED_BYTES + count * recordSize
-            if (frameLength <= 0 || pos + frameLength > payloadEnd) { stoppedAt = pos; break }
+            val bodyLength = count * recordSize
+            if (bodyLength > MAX_FRAME_BYTES) { stoppedAt = pos; break@loop }
+            val frame = ByteArray(FRAME_FIXED_BYTES + bodyLength)
+            System.arraycopy(fixed, 0, frame, 0, FRAME_FIXED_BYTES)
+            val bodyRead = readUpTo(input, frame, FRAME_FIXED_BYTES, bodyLength)
+            if (bodyRead < bodyLength) {
+                stoppedAt = pos
+                break
+            }
+            val frameLength = frame.size
+            payloadCrc.update(frame, 0, frameLength)
+            pos += frameLength
 
             val crc = CRC32()
-            crc.update(bytes, pos, 6)
-            crc.update(bytes, pos + 10, frameLength - 10)
-            if (crc.value.toInt() != readU32(bytes, pos + 6)) {
-                if (complete) throw CorruptLogException("Frame CRC mismatch at payload offset ${pos - payloadStart}")
-                stoppedAt = pos
+            crc.update(frame, 0, 6)
+            crc.update(frame, 10, frameLength - 10)
+            if (crc.value.toInt() != readU32(frame, 6)) {
+                stoppedAt = pos - frameLength
                 break
             }
 
-            var p = pos + FRAME_FIXED_BYTES
-            var corrupted = false
-            if (frameType == FRAME_TYPE_SAMPLES) {
-                for (i in 0 until count) {
-                    val delta = readU64(bytes, p)
-                    if (delta < 0) { corrupted = true; break }
-                    val ts = lastTimestamps.getOrPut(sensorType) { metadata.startedAtMonotonicNanos } + delta
-                    samples.add(
-                        Sample(
-                            sensorType = sensorType,
-                            timestampNanos = ts,
-                            x = unscale(readI32(bytes, p + 8)),
-                            y = unscale(readI32(bytes, p + 12)),
-                            z = unscale(readI32(bytes, p + 16)),
-                            w = unscale(readI32(bytes, p + 20)),
-                            accuracy = bytes[p + 24].toInt() and 0xFF
-                        )
-                    )
-                    lastTimestamps[sensorType] = ts
-                    p += SAMPLE_RECORD_BYTES
-                    sampleCount++
-                }
-            } else {
-                val delta = readU64(bytes, p)
-                if (delta >= 0) {
-                    val ts = lastTimestamps.getOrPut(sensorType) { metadata.startedAtMonotonicNanos } + delta
-                    accuracies.add(AccuracyEvent(sensorType, ts, bytes[p + 8].toInt() and 0xFF))
-                    lastTimestamps[sensorType] = ts
-                } else corrupted = true
-            }
+            val corrupted = decodeFrameInto(frame, frameType, count, header.metadata, lastTimestamps, samples, accuracies)
             if (corrupted) {
-                if (complete) throw CorruptLogException("Invalid record in complete log at payload offset ${pos - payloadStart}")
-                stoppedAt = pos
+                stoppedAt = pos - frameLength
                 break
             }
-            pos += frameLength
+            payloadBytes += frameLength
         }
 
-        // Sanity: a finalized log with zero samples is a recording failure.
-        val log = WatchLog(metadata, samples, accuracies, complete, null)
-        return Pair(log, stoppedAt)
+        var complete = false
+        var incompleteReason: String? = "Log was not finalized"
+        if (trailerCrc != null && trailerLen != null && trailerAtEnd) {
+            if (stoppedAt != null) {
+                // Payload CRC covers the frames we read; a parse stop under a
+                // valid trailer means the writer produced a bad frame.
+                throw CorruptLogException("Frame corruption at payload offset $stoppedAt despite valid trailer")
+            }
+            if (trailerLen == payloadBytes.toInt() && trailerCrc == payloadCrc.value.toInt()) {
+                complete = true
+                incompleteReason = null
+            } else {
+                incompleteReason = "Trailer checksum mismatch"
+            }
+        }
+        if (!complete && stoppedAt != null && incompleteReason == "Log was not finalized") {
+            incompleteReason = "Stopped at payload offset $stoppedAt: truncated"
+        }
+        val log = WatchLog(header.metadata, samples, accuracies, complete, null)
+        return if (complete) ReadResult.Complete(log)
+        else ReadResult.Incomplete(log.copy(incompleteReason = incompleteReason), incompleteReason ?: "incomplete")
+    }
+
+    /** Convenience overload for small/in-memory logs (tests, tiny logs). */
+    public fun read(bytes: ByteArray): ReadResult = read(ByteArrayInputStream(bytes))
+
+    private class Header(val metadata: Metadata)
+
+    private fun readHeader(input: InputStream): Header {
+        val head = ByteArray(HEADER_FIXED)
+        if (readUpTo(input, head) < HEADER_FIXED)
+            throw CorruptLogException("Log too short for header")
+        if (String(head, 0, 5, Charsets.US_ASCII) != MAGIC)
+            throw CorruptLogException("Not a PWTCH log")
+        val version = head[5].toInt() and 0xFF
+        if (version != FORMAT_VERSION)
+            throw CorruptLogException("Unsupported format version $version")
+        val headerLength = readU32(head, 6)
+        if (headerLength < HEADER_FIXED || headerLength > HEADER_FIXED + MAX_METADATA_BYTES)
+            throw CorruptLogException("Header length $headerLength outside bounds")
+        val metadataBytes = ByteArray(headerLength - HEADER_FIXED)
+        if (readUpTo(input, metadataBytes) < metadataBytes.size)
+            throw CorruptLogException("Log too short for metadata (declared $headerLength bytes)")
+        return Header(decodeMetadata(metadataBytes))
+    }
+
+    /** Reads up to buffer.size bytes (or [len] from [offset]), returns count read. */
+    private fun readUpTo(input: InputStream, buffer: ByteArray, offset: Int = 0, len: Int = buffer.size - offset): Int {
+        var total = 0
+        while (total < len) {
+            val n = input.read(buffer, offset + total, len - total)
+            if (n < 0) break
+            total += n
+        }
+        return total
+    }
+
+    private fun matches(bytes: ByteArray, magic: String, length: Int = magic.length): Boolean {
+        for (i in 0 until length) if (bytes[i].toInt() != magic[i].code) return false
+        return true
+    }
+
+    /** Decodes one CRC-verified frame into the record lists; true when invalid. */
+    private fun decodeFrameInto(
+        frame: ByteArray,
+        frameType: Int,
+        count: Int,
+        metadata: Metadata,
+        lastTimestamps: HashMap<Int, Long>,
+        samples: MutableList<Sample>,
+        accuracies: MutableList<AccuracyEvent>
+    ): Boolean {
+        if (frameType == FRAME_TYPE_SAMPLES) {
+            val sensorType = frame[4].toInt() and 0xFF
+            var p = FRAME_FIXED_BYTES
+            for (i in 0 until count) {
+                val delta = readU64(frame, p)
+                if (delta < 0) return true
+                val ts = lastTimestamps.getOrPut(sensorType) { metadata.startedAtMonotonicNanos } + delta
+                samples.add(
+                    Sample(
+                        sensorType = sensorType,
+                        timestampNanos = ts,
+                        x = unscale(readI32(frame, p + 8)),
+                        y = unscale(readI32(frame, p + 12)),
+                        z = unscale(readI32(frame, p + 16)),
+                        w = unscale(readI32(frame, p + 20)),
+                        accuracy = frame[p + 24].toInt() and 0xFF
+                    )
+                )
+                lastTimestamps[sensorType] = ts
+                p += SAMPLE_RECORD_BYTES
+            }
+        } else {
+            val sensorType = frame[4].toInt() and 0xFF
+            val delta = readU64(frame, FRAME_FIXED_BYTES)
+            if (delta < 0) return true
+            val ts = lastTimestamps.getOrPut(sensorType) { metadata.startedAtMonotonicNanos } + delta
+            accuracies.add(AccuracyEvent(sensorType, ts, frame[FRAME_FIXED_BYTES + 8].toInt() and 0xFF))
+            lastTimestamps[sensorType] = ts
+        }
+        return false
     }
 
     // ---- metadata JSON ------------------------------------------------------
@@ -399,9 +468,9 @@ public object WatchLogCodec {
         return encoded
     }
 
-    private fun decodeMetadata(bytes: ByteArray, offset: Int, length: Int): Metadata {
-        if (length <= 0) throw CorruptLogException("Empty metadata JSON")
-        val root = PitwallJson.parse(String(bytes, offset, length, Charsets.UTF_8)) as? PitwallJson.Value.Object
+    private fun decodeMetadata(bytes: ByteArray): Metadata {
+        if (bytes.isEmpty()) throw CorruptLogException("Empty metadata JSON")
+        val root = PitwallJson.parse(String(bytes, Charsets.UTF_8)) as? PitwallJson.Value.Object
             ?: throw CorruptLogException("Metadata is not a JSON object")
         val schema = root.number("schema")?.toInt() ?: 0
         if (schema != FORMAT_VERSION)
