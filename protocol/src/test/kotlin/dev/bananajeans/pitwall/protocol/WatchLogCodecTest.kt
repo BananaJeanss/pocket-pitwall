@@ -302,4 +302,80 @@ class WatchLogCodecTest {
         val expected = md.digest().joinToString("") { "%02x".format(it) }
         assertEquals(expected, WatchLogCodec.SourceMeta.sha256Hex(big))
     }
+    fun literalPwendInsidePayloadIsCorruptionNotTrailer() {
+        val out = ByteArrayOutputStream()
+        val writer = WatchLogCodec.Writer(out, metadata())
+        writer.appendSamples(4, samples(2))
+        writer.appendSamples(4, samples(1, startNanos = 50_010_000_100L))
+        writer.finish()
+        val bytes = out.toByteArray()
+        val trailerAt = bytes.size - WatchLogCodec.TRAILER_SIZE
+        // Overwrite the first payload frame with the trailer magic bytes: the
+        // reader must not treat this as an early trailer and stop there.
+        val payload = "PWEND".toByteArray(Charsets.US_ASCII) + bytes.copyOfRange(trailerAt + 5, trailerAt + 8)
+        System.arraycopy(payload, 0, bytes, bytes.size - WatchLogCodec.TRAILER_SIZE - 38, payload.size)
+
+        val result = WatchLogCodec.read(ByteArrayInputStream(bytes))
+        // The mid-payload magic must not produce a Complete log; either the
+        // real trailer is reached (data after the fake magic fails CRC) or the
+        // log is reported Incomplete with a truncation reason.
+        when (result) {
+            is WatchLogCodec.ReadResult.Complete -> {
+                // Only acceptable if the real trailer validated; the fake
+                // magic region is now corrupt data, so this must not happen.
+                throw AssertionError("Mid-payload PWEND must not be honored as a trailer")
+            }
+            is WatchLogCodec.ReadResult.Incomplete -> {
+                assertTrue(result.log.samples.size < 3,
+                    "Parsing must stop at the corrupted region, got ${result.log.samples.size}")
+            }
+        }
+    }
+
+    fun truncatedTrailerIsIncompleteNotCorrupt() {
+        val out = ByteArrayOutputStream()
+        val writer = WatchLogCodec.Writer(out, metadata())
+        writer.appendSamples(4, samples(2))
+        writer.finish()
+        val bytes = out.toByteArray()
+        // Cut inside the trailer.
+        val cut = bytes.copyOfRange(0, bytes.size - 6)
+        val incomplete = WatchLogCodec.read(ByteArrayInputStream(cut)) as WatchLogCodec.ReadResult.Incomplete
+        assertEquals(2, incomplete.log.samples.size)
+    }
+
+    fun writerIsDeterministicForIdenticalInputs() {
+        // Byte-for-byte identical output for identical inputs: the durable
+        // duplicate detection in later layers relies on this.
+        fun build(): ByteArray {
+            val out = ByteArrayOutputStream()
+            val writer = WatchLogCodec.Writer(out, metadata())
+            writer.appendSamples(4, samples(3))
+            writer.appendAccuracyEvent(WatchLogCodec.AccuracyEvent(4, 50_020_000_000L, 2))
+            writer.finish()
+            return out.toByteArray()
+        }
+        assertTrue(build().contentEquals(build()))
+    }
+
+    fun corruptedSampleValuesInCompleteLogThrowOrStop() {
+        val out = ByteArrayOutputStream()
+        val writer = WatchLogCodec.Writer(out, metadata())
+        writer.appendSamples(4, samples(2))
+        writer.appendSamples(4, samples(1, startNanos = 50_010_000_100L))
+        writer.finish()
+        val bytes = out.toByteArray()
+        // Flip a bit in the first sample record's value area.
+        val flipAt = bytes.size - WatchLogCodec.TRAILER_SIZE - 38 + 12
+        bytes[flipAt] = (bytes[flipAt].toInt() xor 0x40).toByte()
+        val result = WatchLogCodec.read(ByteArrayInputStream(bytes))
+        // Either a CorruptLogException (complete log frame CRC failure) or an
+        // Incomplete with the prefix recovered; never a Complete log.
+        when (result) {
+            is WatchLogCodec.ReadResult.Complete -> throw AssertionError("Corrupted payload must not be Complete")
+            is WatchLogCodec.ReadResult.Incomplete -> assertTrue(result.log.samples.size <= 2)
+        }
+    }
+
+
 }
