@@ -102,11 +102,17 @@ private fun WatchApp() {
         onDispose { thread.interrupt() }
     }
 
-    // Refresh pending count - always re-read when not recording (transfer completion)
-    if (pending < 0 || !status.recording) {
-        val store = remember { WatchLogStore(context) }
-        val count = remember(status.recording, connection.phoneConnected) { store.pendingTransfer().size }
-        if (count != pending) pending = count
+    // Pending transfer count: observed from the TransferQueue's LiveData so
+    // every ack/delete immediately updates it (issue #25 P2). No state-key
+    // heuristics that can go stale.
+    val pendingCountLive = (context.applicationContext as PitwallWatchApplication).transferQueue.observePendingCount()
+    androidx.compose.runtime.LaunchedEffect(pendingCountLive) {
+        pendingCountLive.observe(lifecycleOwner, { count ->
+            pending = count ?: 0
+        })
+    }
+    if (pending < 0) {
+        pending = (context.applicationContext as PitwallWatchApplication).transferQueue.pendingCount()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {

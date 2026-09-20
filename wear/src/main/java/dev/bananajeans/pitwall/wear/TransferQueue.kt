@@ -37,6 +37,20 @@ class TransferQueue(private val context: Context) {
     private val messageClient by lazy { Wearable.getMessageClient(context) }
     private val nodeClient by lazy { Wearable.getNodeClient(context) }
 
+    /** Live pending-transfer count for the UI (issue #25 P2). Posted on
+     *  every queue mutation (ack/delete/serve), so the count can no longer
+     *  go stale via unrelated state keys. */
+    private val pendingCountLive = androidx.lifecycle.MutableLiveData<Int>()
+
+    fun observePendingCount(): androidx.lifecycle.LiveData<Int> = pendingCountLive
+
+    private fun refreshPendingCount() {
+        val count = store.pendingTransfer().size
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            pendingCountLive.postValue(count)
+        }
+    }
+
     /** Backoff timestamp after a NACK; pull messages during backoff are ignored. */
     @Volatile private var retryAfter: Long = 0
 
@@ -105,6 +119,7 @@ class TransferQueue(private val context: Context) {
             store.markImported(message.logId)
             store.delete(message.logId)
         }
+        refreshPendingCount()
     }
 
     /** Queue depth for the UI. */
