@@ -78,7 +78,7 @@ private fun WatchApp() {
     }
     // Observe results reactively via LiveData
     val resultsLiveData = WatchResultsStore.observeResults(context)
-    var results by mutableStateOf(WatchResultsStore.list(context))
+    var results by remember { mutableStateOf(WatchResultsStore.list(context)) }
     var showResult by remember { mutableStateOf(false) }
 
     // Observe results LiveData for reactive updates
