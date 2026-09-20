@@ -86,6 +86,14 @@ object WatchLink {
                     kotlinx.coroutines.delay(10_000)
                 }
             }
+            // Restore any result summaries that never reached the watch
+            // before the last process death (issue #25 P1 durable outbox).
+            appContext?.let { ctx ->
+                val unsent = runCatching { ResultOutbox.pending(ctx) }.getOrDefault(emptyList())
+                if (unsent.isNotEmpty()) {
+                    state.set(state.get().copy(pendingResult = unsent.first()))
+                }
+            }
             // Pre-session clock sync: the more samples, the better the drift fit.
             scope.launch {
                 kotlinx.coroutines.delay(3_000)
@@ -114,7 +122,19 @@ object WatchLink {
                 // show, and pending FINALIZED logs to transfer (issue #22 P1:
                 // reconnect reliably retries). Duplicate pulls are idempotent:
                 // already-imported sessions ACK with Duplicate.
-                previous.pendingResult?.let { send(it) }
+                // Replayed results are idempotent on the watch (one file per
+                // session id, atomic overwrite). They stay in the durable
+                // outbox until explicitly acknowledged.
+                previous.pendingResult?.let {
+                    send(it)
+                    scope.launch {
+                        runCatching {
+                            appContext?.let { ctx ->
+                                ResultOutbox.pending(ctx).forEach { unsent -> if (unsent.sessionId != it.sessionId) send(unsent) }
+                            }
+                        }
+                    }
+                }
                 if (connected) {
                     scope.launch {
                         runCatching {
@@ -319,7 +339,19 @@ object WatchLink {
     /** Send the compact post-session summary (issue #25/#19 result message). */
     fun sendResult(result: Messages.Result) {
         state.set(state.get().copy(pendingResult = result))
+        // Durable outbox (issue #25 P1): if the watch ACKs nothing and the
+        // phone process dies, the summary must survive and replay on the
+        // next reconnect. Idempotent on the watch (one file per session id).
+        appContext?.let { ctx ->
+            runCatching { ResultOutbox.save(ctx, result) }
+        }
         send(result)
+    }
+
+    /** Result message is stored durably once the watch has it; no-op fallback. */
+    fun acknowledgeResult(sessionId: String) {
+        state.set(state.get().copy(pendingResult = null))
+        appContext?.let { ctx -> runCatching { ResultOutbox.clear(ctx, sessionId) } }
     }
 
     fun shutdownForTest() {

@@ -209,7 +209,18 @@ class WatchTransferManager(private val context: Context) {
                 File(inSession, logName).outputStream().use(input::copyTo)
             }
             val rates = result.log.metadata.sensorInfo.associate { it.type to it.requestedRateHz }
-            val sync = WatchLink.captureSyncForSession()
+            // PER-SESSION clock state (P0 fix): the fit captured for THIS
+            // session at its start, and the phone monotonic anchor persisted
+            // when the session was created. Never the global latest fit, and
+            // never the watch's monotonic value from log metadata.
+            val sync = WatchLink.captureSyncForSession(sessionId) ?: WatchLink.captureSyncForSession()
+            val phoneStart = session.phoneStartElapsedNanos.takeIf { it > 0L }
+                ?: result.log.metadata.startedAtMonotonicNanos.let { watchStart ->
+                    // Legacy sessions recorded before the anchor existed:
+                    // map the watch monotonic start through the fit into the
+                    // phone domain rather than mixing epochs directly.
+                    sync?.let { it.phoneFromWatch(watchStart).toLong() }
+                }
             // Derived driver-input metrics (issue #23): computed once at
             // import from the raw log + sync fit; recomputable from raw data.
             val analysis = runCatching {
@@ -217,7 +228,7 @@ class WatchTransferManager(private val context: Context) {
                     samples = result.log.samples.filter { it.sensorType == 4 },
                     fit = sync,
                     durationSeconds = session.duration,
-                    phoneSessionStartNanos = phoneSessionStartNanos(session, result.log)
+                    phoneSessionStartNanos = phoneStart ?: 0L
                 )
             }.getOrNull()
             // HR summary is displayed on the watch in the results round-trip (layer 7);
@@ -242,6 +253,7 @@ class WatchTransferManager(private val context: Context) {
                         quality = it.quality
                     )
                 },
+                phoneStartNanos = phoneStart,
                 logFile = logName,
                 metrics = analysis?.let { a ->
                     WatchSessionInfo.Metrics(
@@ -268,7 +280,11 @@ class WatchTransferManager(private val context: Context) {
                     peakHr = result.log.heartRate.maxOfOrNull { it.bpm },
                     averageHr = result.log.heartRate.map { it.bpm }.takeIf { it.isNotEmpty() }?.average()?.toInt(),
                     watchDataQuality = info.metrics?.quality,
-                    notes = if (result.log.complete) null else "Watch log incomplete"
+                    notes = if (result.log.complete) null else "Watch log incomplete",
+                    // Immutable phone session creation wall-clock timestamp
+                    // (issue #25/#19 P1): stable chronological key across
+                    // reconnect/restart; never monotonic elapsed time.
+                    timestamp = session.created
                 )
             )
         } catch (_: Exception) {
@@ -276,27 +292,8 @@ class WatchTransferManager(private val context: Context) {
         }
     }
 
-    /** Phone monotonic session start reconstructed from the phone session's clock anchor. */
-    private fun phoneSessionStartNanos(session: Session, log: WatchLogCodec.WatchLog): Long {
-        // The phone session stores `created` (wall ms) and we have the watch's
-        // monotonic start from the log metadata. We need the phone's monotonic
-        // clock at session start for accurate analysis.
-        // 
-        // The phone monotonic time at session start is captured in SessionStore
-        // when the session is created (RecorderService.startRecording). We can
-        // use the session's created time (wall ms) and the watch log's wall
-        // start to compute the alignment, but the most accurate approach is
-        // to store the phone monotonic start in the session metadata.
-        //
-        // For now, we use the watch log's monotonic start as the anchor since
-        // the sync fit maps watch -> phone. The phone session start in the
-        // phone timeline is approximately the watch log's monotonic start
-        // mapped through the sync fit.
-        return log.metadata.startedAtMonotonicNanos
-    }
-
+    /** Phone tells the watch to send its pending logs. */
     companion object {
-        /** Phone tells the watch to send its pending logs. */
         const val PATH_PULL = "/pitwall/log/pull"
     }
 }
