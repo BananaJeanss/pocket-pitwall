@@ -76,9 +76,13 @@ class HeartRateRecorder(
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     companion object {
-        /** Requests BODY_SENSORS at runtime (watch UI calls this on launch). */
+        /** Requests BODY_SENSORS at runtime (watch UI calls this on launch).
+         *  API 33+ grants BODY_SENSORS at install time; requesting it there
+         *  is a no-op at best and a crash path on some watch skins, so only
+         *  older builds need the runtime request. */
         fun needsPermission(context: Context): Boolean =
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BODY_SENSORS) !=
+            Build.VERSION.SDK_INT < 33 &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BODY_SENSORS) !=
                 PackageManager.PERMISSION_GRANTED
     }
 }
