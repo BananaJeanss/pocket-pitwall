@@ -47,8 +47,17 @@ object WatchLink {
     private val state = AtomicReference(State())
     val currentState: State get() = state.get()
 
+    /** Fits captured per session id at session start (issue #22 P0/P1):
+     *  import/analysis must use THIS session's fit, never a global latest. */
+    private val sessionFits = HashMap<String, ClockSync.Fit>()
+
+    /** Callbacks invoked when a FINALIZED StopAck arrives (transfer-safe point). */
+    private val transferReadyCallbacks = ArrayList<() -> Unit>()
+
     private lateinit var messageClient: MessageClient
     private lateinit var nodeClient: NodeClient
+    /** Application context captured at initialize() for the transfer handoff. */
+    @Volatile private var appContext: Context? = null
     private val control = SessionControl()
     private val exchanges = ArrayList<ClockSync.Exchange>()
 
@@ -61,7 +70,16 @@ object WatchLink {
             initialized = true
             messageClient = Wearable.getMessageClient(context.applicationContext)
             nodeClient = Wearable.getNodeClient(context.applicationContext)
+            appContext = context.applicationContext
             messageClient.addListener(::onMessage)
+            // Wire the finalized-StopAck -> transfer-pull handoff (issue #22 P1).
+            val ctx = context.applicationContext
+            synchronized(transferReadyCallbacks) {
+                transferReadyCallbacks.clear()
+                transferReadyCallbacks.add {
+                    WatchTransferManager.getInstance(ctx).pullPending()
+                }
+            }
             scope.launch {
                 while (true) {
                     refreshNodes()
@@ -92,8 +110,20 @@ object WatchLink {
                         watchName = watch?.displayName
                     )
                 )
-                // A newly (re)connected watch may have pending results to show.
+                // A newly (re)connected watch may have pending results to
+                // show, and pending FINALIZED logs to transfer (issue #22 P1:
+                // reconnect reliably retries). Duplicate pulls are idempotent:
+                // already-imported sessions ACK with Duplicate.
                 previous.pendingResult?.let { send(it) }
+                if (connected) {
+                    scope.launch {
+                        runCatching {
+                            appContext?.let { ctx ->
+                                WatchTransferManager.getInstance(ctx).syncPendingOnReconnect()
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -135,6 +165,15 @@ object WatchLink {
             is Messages.StopAck -> {
                 synchronized(control) { control.onStopAck(message) }
                 publishControl()
+                // Pull the finalized log ONLY after the watch confirms
+                // finalization (issue #22 P1). A finalized StopAck is the
+                // single source of truth that the log is queued; pulls sent
+                // earlier are dropped by the watch's transfer queue.
+                if (message.finalized) {
+                    synchronized(transferReadyCallbacks) {
+                        transferReadyCallbacks.forEach { callback -> callback() }
+                    }
+                }
             }
             is Messages.Status -> Unit // consumed via acks; UI uses its own state
             is Messages.Hello, is Messages.Start, is Messages.Stop,
@@ -169,11 +208,25 @@ object WatchLink {
                 send(Messages.SyncPing(sessionId, t1))
                 kotlinx.coroutines.delay(250)
             }
+            // Freeze the fit for THIS session once the extra anchors land:
+            // later pings may still refine the global fit, but this session's
+            // analysis must use the fit from its own recording window.
+            kotlinx.coroutines.delay(1500)
+            val frozen = state.get().lastSyncFit
+            if (frozen != null) {
+                synchronized(sessionFits) {
+                    sessionFits[sessionId] = frozen
+                    if (sessionFits.size > 32) {
+                        val oldest = sessionFits.keys.first()
+                        sessionFits.remove(oldest)
+                    }
+                }
+            }
         }
     }
 
     /** Called when a phone recording stops. Same never-fail contract. */
-    fun onPhoneSessionStopped(sessionId: String) {
+    fun onPhoneSessionStopped(sessionId: String, context: Context) {
         try {
             val message = synchronized(control) { control.stop() }
             if (message != null) {
@@ -182,6 +235,10 @@ object WatchLink {
             publishControl()
         } catch (_: Exception) {
         }
+        // NO pull here (issue #22 P1): the watch transfer queue ignores pulls
+        // while still recording/finalizing. The pull happens when the
+        // FINALIZED StopAck arrives (see onMessage StopAck branch), which is
+        // the only reliable signal that the watch log is queued.
     }
 
     /**
@@ -248,8 +305,16 @@ object WatchLink {
     /**
      * Persisted sync snapshot for this session, captured at stop time so the
      * importer can align watch samples to the phone timeline (layer 5).
+     * With a sessionId, returns the fit frozen for that session at start;
+     * without, the latest global fit (legacy behavior for callers without
+     * session context).
      */
-    fun captureSyncForSession(): ClockSync.Fit? = state.get().lastSyncFit
+    fun captureSyncForSession(sessionId: String? = null): ClockSync.Fit? {
+        if (sessionId != null) {
+            synchronized(sessionFits) { sessionFits[sessionId] }?.let { return it }
+        }
+        return state.get().lastSyncFit
+    }
 
     /** Send the compact post-session summary (issue #25/#19 result message). */
     fun sendResult(result: Messages.Result) {

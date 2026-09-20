@@ -62,7 +62,11 @@ class RecorderService : Service(), SensorEventListener {
                 val sensors=listOf(Sensor.TYPE_LINEAR_ACCELERATION,Sensor.TYPE_GYROSCOPE,Sensor.TYPE_GAME_ROTATION_VECTOR).mapNotNull { manager.getDefaultSensor(it) }
                 require(sensors.any { it.type==Sensor.TYPE_LINEAR_ACCELERATION } && sensors.any { it.type==Sensor.TYPE_GYROSCOPE }) { "Linear acceleration and gyroscope sensors are required." }
                 origin=SystemClock.elapsedRealtimeNanos(); lastFlush=origin
-                session=Session(title=title,direction=direction,sensors=sensors.joinToString("; ") { "${it.type}: ${it.name} (${it.vendor})" })
+                session=Session(
+                    title=title, direction=direction,
+                    phoneStartElapsedNanos=origin,
+                    sensors=sensors.joinToString("; ") { "${it.type}: ${it.name} (${it.vendor})" }
+                )
                 store.save(session!!)
                 output=FileOutputStream(store.raw(session!!.id))
                 writer=output!!.bufferedWriter().apply { write("elapsed_s,sensor_type,x,y,z,w,accuracy\n"); flush() }
@@ -124,7 +128,7 @@ class RecorderService : Service(), SensorEventListener {
                 }
             }
             // Tell the watch to finalize its log and queue the transfer.
-            WatchLink.onPhoneSessionStopped(finished.id)
+            WatchLink.onPhoneSessionStopped(finished.id, applicationContext)
         }
 
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }

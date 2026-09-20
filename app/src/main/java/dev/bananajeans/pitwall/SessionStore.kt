@@ -18,6 +18,8 @@ import kotlin.math.sqrt
 data class Session(
     val id: String = UUID.randomUUID().toString(),
     val created: Long = System.currentTimeMillis(),
+    /** Phone monotonic clock (SystemClock.elapsedRealtimeNanos) at recording start. */
+    val phoneStartElapsedNanos: Long = 0L,
     val title: String = "Motorcity · Underground",
     val direction: String = "Normal",
     val status: String = "recording",
@@ -27,14 +29,18 @@ data class Session(
     val sensors: String = "",
     val notes: String = "",
     val track: List<Pair<Float, Float>> = emptyList(),
-    val pins: Map<String, Pair<Float, Float>> = emptyMap()
+    val pins: Map<String, Pair<Float, Float>> = emptyMap(),
+    /** Optional watch telemetry metadata; null for phone-only sessions. */
+    val watch: WatchSessionInfo? = null
 ) {
     fun json(): JSONObject = JSONObject().put("schemaVersion", 1).put("id", id).put("created", created)
+        .put("phoneStartElapsedNanos", phoneStartElapsedNanos)
         .put("title", title).put("direction", direction).put("status", status).put("duration", duration)
         .put("lengthMeters", length).put("sensors", sensors).put("notes", notes)
         .put("marks", JSONArray().apply { marks.forEach { put(JSONObject().put("seconds", it.t).put("kind", it.kind).put("estimated", it.estimated)) } })
         .put("track", JSONArray().apply { track.forEach { put(JSONArray().put(it.first).put(it.second)) } })
         .put("pins", JSONObject().apply { pins.forEach { (k,v) -> put(k, JSONArray().put(v.first).put(v.second)) } })
+        .apply { watch?.let { put("watch", dev.bananajeans.pitwall.protocol.PitwallJson.write(it.json())) } }
 }
 
 data class Trace(val acceleration: List<Telemetry.Point>, val rotation: List<Telemetry.Point>, val gaps: Int)
@@ -61,9 +67,18 @@ class SessionStore(context: Context) {
         val marks = j.optJSONArray("marks") ?: JSONArray()
         val track = j.optJSONArray("track") ?: JSONArray()
         val pins = j.optJSONObject("pins") ?: JSONObject()
+        // Optional watch metadata: absent => phone-only session (unchanged).
+        val watch = j.optString("watch", "").takeIf { it.isNotEmpty() }?.let { text ->
+            runCatching {
+                WatchSessionInfo.fromJson(
+                    dev.bananajeans.pitwall.protocol.PitwallJson.parse(text) as dev.bananajeans.pitwall.protocol.PitwallJson.Value.Object
+                )
+            }.getOrNull()
+        }
         return Session(
             id=id,
             created=j.getLong("created"),
+            phoneStartElapsedNanos=j.optLong("phoneStartElapsedNanos", 0L),
             title=j.getString("title"),
             direction=j.optString("direction", "Normal"),
             status=j.optString("status", "complete"),
@@ -76,7 +91,8 @@ class SessionStore(context: Context) {
                 Telemetry.Mark(m.getDouble("seconds"), m.getString("kind"), m.optBoolean("estimated", false))
             },
             track=(0 until track.length()).map { track.getJSONArray(it).let { p -> p.getDouble(0).toFloat() to p.getDouble(1).toFloat() } },
-            pins=pins.keys().asSequence().associateWith { pins.getJSONArray(it).let { p -> p.getDouble(0).toFloat() to p.getDouble(1).toFloat() } }
+            pins=pins.keys().asSequence().associateWith { pins.getJSONArray(it).let { p -> p.getDouble(0).toFloat() to p.getDouble(1).toFloat() } },
+            watch=watch
         )
     }
 
@@ -118,6 +134,15 @@ class SessionStore(context: Context) {
         zip.putNextEntry(ZipEntry("sensors.csv"))
         sensorFile.inputStream().buffered().use { it.copyTo(zip) }
         zip.closeEntry()
+        // Optional raw watch log travels with the session when present.
+        session.watch?.logFile?.let { name ->
+            val watchFile = File(File(root, session.id), name)
+            if (watchFile.isFile) {
+                zip.putNextEntry(ZipEntry("watch/$name"))
+                watchFile.inputStream().buffered().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
+        }
         zip.finish()
         zip.flush()
     }
@@ -130,6 +155,7 @@ class SessionStore(context: Context) {
 
     private fun importZipInternal(input: InputStream, preserveId: Boolean): Session? {
         val tempSensors = File.createTempFile("pitwall-import-", ".csv", root)
+        var tempWatch: File? = null
         var destinationFolder: File? = null
         try {
             var metadata: String? = null
@@ -138,7 +164,7 @@ class SessionStore(context: Context) {
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     if (!entry.isDirectory) {
-                        when (entry.name.substringAfterLast('/')) {
+                        when (val base = entry.name.substringAfterLast('/')) {
                             "session.json" -> {
                                 val bytes = ByteArrayOutputStream()
                                 copyLimited(zip, bytes, 1_048_576)
@@ -147,6 +173,10 @@ class SessionStore(context: Context) {
                             "sensors.csv" -> {
                                 tempSensors.outputStream().buffered().use { out -> copyLimited(zip, out, 268_435_456) }
                                 hasSensors = true
+                            }
+                            else -> if (base.endsWith(".pwtch")) {
+                                tempWatch = File.createTempFile("pitwall-watch-", ".pwtch", root)
+                                tempWatch!!.outputStream().buffered().use { out -> copyLimited(zip, out, 268_435_456) }
                             }
                         }
                     }
@@ -165,6 +195,7 @@ class SessionStore(context: Context) {
 
             if (preserveId && hasSession(id)) {
                 tempSensors.delete()
+                tempWatch?.delete()
                 return null
             }
 
@@ -178,10 +209,26 @@ class SessionStore(context: Context) {
                 }
                 tempSensors.delete()
             }
+            // Restore the embedded watch log next to the session data.
+            imported.watch?.logFile?.let { name ->
+                tempWatch?.let { watch ->
+                    if (watch.isFile) {
+                        val target = File(destinationFolder, name)
+                        if (!watch.renameTo(target)) {
+                            watch.inputStream().buffered().use { source ->
+                                target.outputStream().buffered().use(source::copyTo)
+                            }
+                            watch.delete()
+                        }
+                    }
+                }
+            }
+            tempWatch?.delete()
             save(imported)
             return imported
         } catch (e: Exception) {
             tempSensors.delete()
+            tempWatch?.delete()
             destinationFolder?.deleteRecursively()
             throw e
         }

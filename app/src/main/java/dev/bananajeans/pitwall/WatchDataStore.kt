@@ -5,8 +5,10 @@ import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.Messages
 import dev.bananajeans.pitwall.protocol.WatchLogImporter
-import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,8 +21,11 @@ import kotlinx.coroutines.tasks.await
  * Uses the shared [WatchLogImporter] for validation/idempotency and adds the
  * transport: receive bytes over ChannelClient, then transferAck the watch
  * (ok=true deletes the watch's copy; ok=false makes it retry later).
+ *
+ * Process-scoped singleton: exactly one ChannelClient callback registered
+ * for the lifetime of the phone app process.
  */
-class WatchTransferManager(private val context: Context) {
+class WatchTransferManager private constructor(private val context: Context) {
 
     data class TransferState(
         /** Session ids currently being received. */
@@ -38,17 +43,28 @@ class WatchTransferManager(private val context: Context) {
     private val channelClient by lazy { Wearable.getChannelClient(context) }
     private val messageClient by lazy { Wearable.getMessageClient(context) }
     private val nodeClient by lazy { Wearable.getNodeClient(context) }
-
     private val importer by lazy { WatchLogImporter(WatchDataStore.dir(context)) }
 
-    fun start() {
-        channelClient.registerChannelCallback(object : ChannelClient.ChannelCallback() {
-            override fun onChannelOpened(channel: ChannelClient.Channel) {
-                if (channel.path.startsWith("/pitwall/log/")) {
-                    receive(channel)
-                }
+    // Ensure exactly one callback is registered for the process lifetime
+    private val callbackRegistered = AtomicBoolean(false)
+    private val channelCallback = object : ChannelClient.ChannelCallback() {
+        override fun onChannelOpened(channel: ChannelClient.Channel) {
+            if (channel.path.startsWith("/pitwall/log/")) {
+                receive(channel)
             }
-        })
+        }
+    }
+
+    fun start() {
+        if (callbackRegistered.compareAndSet(false, true)) {
+            channelClient.registerChannelCallback(channelCallback)
+        }
+    }
+
+    fun stop() {
+        if (callbackRegistered.compareAndSet(true, false)) {
+            channelClient.unregisterChannelCallback(channelCallback)
+        }
     }
 
     /** Asks the watch to open channels for its pending logs. The watch replies
@@ -69,10 +85,19 @@ class WatchTransferManager(private val context: Context) {
     }
 
     /**
-     * Called when the phone's own session stops to ensure we pull any newly
-     * finalized watch log promptly (not just at app startup).
+     * Called when the phone's session has successfully stopped and the watch
+     * has ACKed finalization. Pulls any newly finalized watch log.
+     * This ensures the watch has finished writing the log before we ask for it.
      */
     fun pullAfterSessionStop() {
+        pullPending()
+    }
+
+    /**
+     * Trigger pull on reconnect (node reconnected after disconnect).
+     * Ensures any logs finalized during disconnect get transferred.
+     */
+    fun syncPendingOnReconnect() {
         pullPending()
     }
 
@@ -87,15 +112,22 @@ class WatchTransferManager(private val context: Context) {
                 try {
                     // Stream to temp file instead of buffering in memory - large logs
                     // can be tens of MB and ByteArrayOutputStream can OOM.
-                    val tempDir = java.io.File(context.cacheDir, "watch-import")
+                    val tempDir = File(context.cacheDir, "watch-import")
                     tempDir.mkdirs()
-                    val tempFile = java.io.File.createTempFile("import-$sessionId-", ".pwtch", tempDir)
+                    val tempFile = File.createTempFile("import-$sessionId-", ".pwtch", tempDir)
                     try {
-                        val output = java.io.FileOutputStream(tempFile)
-                        input.use { it.copyTo(output) }
-                        output.flush()
-                        val bytes = tempFile.readBytes()
-                        when (val result = importer.import(sessionId, bytes)) {
+                        val output = FileOutputStream(tempFile)
+                        try {
+                            input.use { it.copyTo(output) }
+                            output.flush()
+                            output.fd.sync() // fsync before validation
+                        } finally {
+                            output.close()
+                        }
+                        
+                        // Import directly from the temp file (no readBytes() copy)
+                        val result = importer.importFromFile(sessionId, tempFile)
+                        when (result) {
                             is WatchLogImporter.Result.Imported -> {
                                 state.set(
                                     state.get().copy(
@@ -105,7 +137,7 @@ class WatchTransferManager(private val context: Context) {
                                     )
                                 )
                                 ack(sessionId, accepted = true, reason = null)
-                                // Session model integration happens in the next layer.
+                                attachToSession(sessionId, result)
                             }
                             is WatchLogImporter.Result.Duplicate -> {
                                 state.set(
@@ -156,9 +188,75 @@ class WatchTransferManager(private val context: Context) {
         }
     }
 
+    /**
+     * Attaches imported watch metadata to the phone session with the same id
+     * (session ids are generated by the phone and passed to the watch at
+     * start). The raw log is copied into the session folder; sync quality is
+     * captured from WatchLink. When the session is not present (e.g. phone
+     * app data was cleared), the log stays in watch-logs as an orphan for
+     * later manual recovery rather than being silently dropped.
+     */
+    private fun attachToSession(sessionId: String, result: WatchLogImporter.Result.Imported) {
+        try {
+            val store = SessionStore(context)
+            val session = store.list().firstOrNull { it.id == sessionId } ?: return
+            if (!RecorderService.active.value) store.recover()
+            val inSession = File(File(context.filesDir, "sessions"), sessionId).apply { mkdirs() }
+            val logName = "watch.pwtch"
+            result.storedAt.inputStream().use { input ->
+                File(inSession, logName).outputStream().use(input::copyTo)
+            }
+            val rates = result.log.metadata.sensorInfo.associate { it.type to it.requestedRateHz }
+            // PER-SESSION clock state (P0 fix): the fit captured for THIS
+            // session at its start, and the phone monotonic anchor persisted
+            // when the session was created. Never the global latest fit, and
+            // never the watch's monotonic value from log metadata.
+            val sync = WatchLink.captureSyncForSession(sessionId) ?: WatchLink.captureSyncForSession()
+            val phoneStart = session.phoneStartElapsedNanos.takeIf { it > 0L }
+            val info = WatchSessionInfo(
+                status = WatchSessionInfo.Status.IMPORTED,
+                deviceModel = result.log.metadata.deviceModel,
+                watchAppVersion = result.log.metadata.watchAppVersion,
+                logComplete = result.log.complete,
+                sampleCount = result.log.samples.size.toLong(),
+                sensorRates = rates,
+                sync = sync?.let {
+                    WatchSessionInfo.Sync(
+                        offsetWatchMinusPhone = it.offsetWatchMinusPhone,
+                        driftPerNano = it.driftPerNano,
+                        bestRttNanos = it.bestRttNanos,
+                        residualRmsNanos = it.residualRmsNanos,
+                        exchangesUsed = it.exchangesUsed,
+                        quality = it.quality
+                    )
+                },
+                logFile = logName,
+                phoneStartNanos = phoneStart,
+                metrics = null
+            )
+            store.save(session.copy(watch = info))
+            SessionRepository.refresh()
+        } catch (_: Exception) {
+            // Session attachment is best-effort; the raw log remains stored.
+        }
+    }
+
     companion object {
         /** Phone tells the watch to send its pending logs. */
         const val PATH_PULL = "/pitwall/log/pull"
+
+        /**
+         * True process-scoped owner (issue #21 P1): one instance per app
+         * process, created with the APPLICATION context, so Activity
+         * recreation can never register a second ChannelClient callback or
+         * leak the old one. getInstance()/start() are idempotent.
+         */
+        @Volatile private var instance: WatchTransferManager? = null
+
+        fun getInstance(context: Context): WatchTransferManager =
+            instance ?: synchronized(this) {
+                instance ?: WatchTransferManager(context.applicationContext).also { instance = it }
+            }
     }
 }
 
@@ -166,6 +264,6 @@ class WatchTransferManager(private val context: Context) {
 object WatchDataStore {
     private const val DIR = "watch-logs"
 
-    fun dir(context: Context): java.io.File =
-        java.io.File(context.filesDir, DIR).apply { mkdirs() }
+    fun dir(context: Context): File =
+        File(context.filesDir, DIR).apply { mkdirs() }
 }
