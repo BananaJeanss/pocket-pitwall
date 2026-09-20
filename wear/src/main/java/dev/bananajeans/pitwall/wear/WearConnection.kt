@@ -56,6 +56,15 @@ class WearConnection(private val context: Context) {
     // Track in-progress stop finalization so duplicate stops can re-ack correctly
     private val stopInProgress = mutableSetOf<String>()
 
+    // Durable log store: Start/Stop decisions are made from disk state so a
+    // fresh process never truncates a recovered log (issue #19) and never
+    // leaves a Stop pending forever (issue #20).
+    private val store = WatchLogStore(context)
+
+    // Single-thread executor for disk hashing work (sidecar writes, orphan
+    // finalization) that must not run on the message-handler thread.
+    private val diskExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
     private val messageListener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
         handleMessage(event)
     }
@@ -63,6 +72,10 @@ class WearConnection(private val context: Context) {
     fun start() {
         messageClient.addListener(messageListener)
         refreshNodes()
+        // Convert crash orphans (RECORDING without a live writer) to
+        // FINALIZED + source sidecar BEFORE any Start/Stop can be decided,
+        // so durable-state answers see consistent disk state (issue #19).
+        diskExecutor.execute { runCatching { store.recover() } }
         scope.launch {
             while (true) {
                 refreshNodes()
@@ -157,7 +170,31 @@ class WearConnection(private val context: Context) {
             return
         }
 
-        // New start sequence - launch recorder and wait for callback
+        val live = RecorderService.status.takeIf { it.recording }?.sessionId
+        val durable = store.list().firstOrNull { it.sessionId == message.sessionId }
+        when (SessionPolicy.onStart(message.sessionId, live, durable?.state)) {
+            SessionPolicy.StartAction.EXECUTE -> launchRecorder(message)
+            SessionPolicy.StartAction.ACK_RECORDING -> {
+                // Already recording, or the session already has a durable log
+                // (e.g. replayed Start after a watch process restart). Never
+                // re-execute: opening a writer would truncate the recovered log.
+                watchControl.onStartCompleted(
+                    message.sessionId, message.startSeq, true,
+                    BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION
+                )
+                send(Messages.StartAck(message.sessionId, true, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+            }
+            SessionPolicy.StartAction.ACK_BUSY -> {
+                watchControl.onStartCompleted(
+                    message.sessionId, message.startSeq, false,
+                    BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION
+                )
+                send(Messages.StartAck(message.sessionId, false, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
+            }
+        }
+    }
+
+    private fun launchRecorder(message: Messages.Start) {
         val intent = android.content.Intent(context, RecorderService::class.java)
             .setAction(RecorderService.ACTION_START)
             .putExtra(RecorderService.EXTRA_SESSION_ID, message.sessionId)
@@ -209,20 +246,42 @@ class WearConnection(private val context: Context) {
             return
         }
 
-        // New stop sequence - start finalization and wait for callback
-        stopInProgress.add(message.sessionId)
-        val ackCallback = object : RecorderService.Companion.StopCallback {
-            override fun onStopped(finalized: Boolean) {
-                stopInProgress.remove(message.sessionId)
-                watchControl.onStopCompleted(message.sessionId, message.stopSeq, finalized)
-                send(Messages.StopAck(message.sessionId, finalized, message.sessionId, Messages.PROTOCOL_VERSION))
+        // Decide from LIVE + DURABLE state so a fresh process never leaves a
+        // Stop "in progress" (issue #20) and never truncates recovered bytes.
+        val live = RecorderService.status.takeIf { it.recording }?.sessionId
+        val durable = store.list().firstOrNull { it.sessionId == message.sessionId }
+        val decision = SessionPolicy.onStop(message.sessionId, live, durable)
+        when (decision.action) {
+            SessionPolicy.StopAction.EXECUTE_LIVE -> {
+                stopInProgress.add(message.sessionId)
+                val ackCallback = object : RecorderService.Companion.StopCallback {
+                    override fun onStopped(finalized: Boolean) {
+                        stopInProgress.remove(message.sessionId)
+                        watchControl.onStopCompleted(message.sessionId, message.stopSeq, finalized)
+                        send(Messages.StopAck(message.sessionId, finalized, message.sessionId, Messages.PROTOCOL_VERSION))
+                    }
+                }
+                RecorderService.setStopCallback(message.sessionId, ackCallback)
+                context.startService(
+                    android.content.Intent(context, RecorderService::class.java)
+                        .setAction(RecorderService.ACTION_STOP)
+                )
+            }
+            SessionPolicy.StopAction.ACK_DURABLE -> {
+                watchControl.onStopCompleted(message.sessionId, message.stopSeq, decision.ackFinalized)
+                send(Messages.StopAck(message.sessionId, decision.ackFinalized, message.sessionId, Messages.PROTOCOL_VERSION))
+            }
+            SessionPolicy.StopAction.FINALIZE_ORPHAN -> {
+                // Crash orphan: finalize from disk (keeps every byte, writes
+                // the source sidecar), then ACK with the actual log tail.
+                diskExecutor.execute {
+                    val complete = SessionPolicy.logLooksComplete(store.logFile(message.sessionId))
+                    store.markFinalized(message.sessionId, complete)
+                    watchControl.onStopCompleted(message.sessionId, message.stopSeq, complete)
+                    send(Messages.StopAck(message.sessionId, complete, message.sessionId, Messages.PROTOCOL_VERSION))
+                }
             }
         }
-        RecorderService.setStopCallback(message.sessionId, ackCallback)
-        context.startService(
-            android.content.Intent(context, RecorderService::class.java)
-                .setAction(RecorderService.ACTION_STOP)
-        )
     }
 
     fun recordExchange(t1: Long, t2: Long, t3: Long, t4: Long) {
