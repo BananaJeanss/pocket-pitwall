@@ -90,32 +90,22 @@ object WristAnalysis {
             return Result(2, emptyList(), 0.0, 0, emptyList(), 1.0, "Mapped samples fell outside the session timeline")
         }
 
-        // Clip to the session window FIRST, then choose the steering axis
-        // from in-session data only: post-session motion (e.g. removing the
-        // watch) must never influence axis selection.
-        val inWindow = ArrayList<Pair<Int, Double>>(samples.size) // index -> t seconds
-        for (i in samples.indices) {
-            val phoneNanos = fit.phoneFromWatch(samples[i].timestampNanos)
-            val t = (phoneNanos - phoneSessionStartNanos) / 1e9
-            if (t < 0 || t > durationSeconds) continue
-            inWindow.add(i to t)
-        }
-        if (inWindow.size < MIN_SAMPLES) {
-            return Result(2, emptyList(), 0.0, 0, emptyList(), 1.0, "Mapped samples fell outside the session timeline")
-        }
-
         // Choose the axis with the highest variance as the steering axis
         // (wrist turning dominates the gyro trace around one axis).
-        val axis = pickAxis(inWindow.map { samples[it.first] })
+        val axis = pickAxis(samples)
         val axisValues = samples.map { sample ->
             when (axis) {
                 0 -> sample.x; 1 -> sample.y; else -> sample.z
             }
         }
-        val points = ArrayList<Telemetry.Point>(inWindow.size)
+        val points = ArrayList<Telemetry.Point>(samples.size)
         var lastT = Double.NEGATIVE_INFINITY
         var gaps = 0
-        for ((i, t) in inWindow) {
+        for (i in samples.indices) {
+            val phoneNanos = fit.phoneFromWatch(samples[i].timestampNanos)
+            val t = (phoneNanos - phoneSessionStartNanos) / 1e9
+            // Clip to session window [0, durationSeconds]
+            if (t < 0 || t > durationSeconds) continue
             if (t - lastT > 0.25) gaps++
             points.add(Telemetry.Point(t, axisValues[i]))
             lastT = t
