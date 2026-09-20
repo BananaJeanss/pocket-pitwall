@@ -11,8 +11,6 @@
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:supportsRtl="true">
-        <!-- Uses-sdk: minSdk/targetSdk declared in build.gradle.kts; the watch
-             form factor is expressed via uses-feature above. -->
         <uses-library
             android:name="com.google.android.wearable"
             android:required="false" />
@@ -27,5 +25,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".RecorderService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User initiated offline wrist motion sensor recording with screen off, stopped by user or after one hour" />
+        </service>
     </application>
 </manifest>
