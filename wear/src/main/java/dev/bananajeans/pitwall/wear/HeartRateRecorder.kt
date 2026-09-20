@@ -81,8 +81,7 @@ class HeartRateRecorder(
          *  is a no-op at best and a crash path on some watch skins, so only
          *  older builds need the runtime request. */
         fun needsPermission(context: Context): Boolean =
-            Build.VERSION.SDK_INT < 33 &&
-                ContextCompat.checkSelfPermission(context, Manifest.permission.BODY_SENSORS) !=
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BODY_SENSORS) !=
                 PackageManager.PERMISSION_GRANTED
     }
 }
