@@ -5,9 +5,14 @@ import java.io.ByteArrayOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 
 class WatchLogCodecTest {
+
+    @get:Rule val tempFolder = TemporaryFolder()
 
     private fun metadata(sessionId: String = "sess-1") = WatchLogCodec.Metadata(
         sessionId = sessionId,
@@ -286,5 +291,47 @@ class WatchLogCodecTest {
             is WatchLogCodec.ReadResult.Complete -> throw AssertionError("Corrupted payload must not be Complete")
             is WatchLogCodec.ReadResult.Incomplete -> assertTrue(result.log.samples.size <= 2)
         }
+    }
+
+    @Test
+    fun sourceMetaRoundTripsThroughJson() {
+        val meta = WatchLogCodec.SourceMeta(
+            sessionId = "session-1",
+            formatVersion = WatchLogCodec.FORMAT_VERSION,
+            expectedBytes = 123_456L,
+            sha256 = "a".repeat(64),
+            complete = false
+        )
+        val parsed = WatchLogCodec.SourceMeta.parseJson(meta.encodeJson())
+        assertEquals(meta, parsed)
+    }
+
+    @Test
+    fun sourceMetaParseRejectsGarbageAndIncompleteJson() {
+        assertNull(WatchLogCodec.SourceMeta.parseJson("not json"))
+        assertNull(WatchLogCodec.SourceMeta.parseJson("{\"sid\":\"x\"}"))
+        assertNull(WatchLogCodec.SourceMeta.parseJson("{}"))
+    }
+
+    @Test
+    fun sourceMetaSha256MatchesKnownVectorAndIsStreamed() {
+        val tmp = tempFolder.newFile("sha.bin")
+        tmp.writeBytes(byteArrayOf(1, 2, 3, 4, 5))
+        // sha256sum of bytes 0x01..0x05 (computed externally).
+        assertEquals(
+            "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+            WatchLogCodec.SourceMeta.sha256Hex(tmp)
+        )
+        // Larger than one 64 KiB buffer to prove the streaming loop.
+        val big = tempFolder.newFile("sha-big.bin")
+        big.outputStream().use { out ->
+            val chunk = ByteArray(64 * 1024) { 7 }
+            repeat(3) { out.write(chunk) }
+            out.write(ByteArray(100) { 9 })
+        }
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        md.update(big.readBytes())
+        val expected = md.digest().joinToString("") { "%02x".format(it) }
+        assertEquals(expected, WatchLogCodec.SourceMeta.sha256Hex(big))
     }
 }

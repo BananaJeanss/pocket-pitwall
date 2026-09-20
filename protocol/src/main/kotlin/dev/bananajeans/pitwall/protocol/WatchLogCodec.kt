@@ -95,6 +95,66 @@ public object WatchLogCodec {
     /** A timestamped accuracy change for a sensor (no values). */
     public data class AccuracyEvent(val sensorType: Int, val timestampNanos: Long, val accuracy: Int)
 
+    /**
+     * Durable OUT-OF-BAND source metadata for a watch log (issue #21).
+     *
+     * Written by the watch NEXT TO the log file (never inside it) so the
+     * phone can tell a legitimately crash-recovered INCOMPLETE source from
+     * a transport-truncated copy:
+     *   - intact recovered incomplete source with matching length/hash -> accept
+     *   - transport-truncated copy                                     -> reject
+     *   - any hash mismatch                                            -> reject
+     * A finalized log is still validated by its in-file trailer; the
+     * sidecar is additional evidence, not a substitute.
+     */
+    public data class SourceMeta(
+        val sessionId: String,
+        val formatVersion: Int,
+        val expectedBytes: Long,
+        val sha256: String,
+        val complete: Boolean
+    ) {
+        public fun encodeJson(): String = PitwallJson.write(
+            PitwallJson.obj(
+                "sid" to PitwallJson.s(sessionId),
+                "fmt" to PitwallJson.n(formatVersion.toLong()),
+                "bytes" to PitwallJson.n(expectedBytes),
+                "sha256" to PitwallJson.s(sha256),
+                "complete" to PitwallJson.b(complete)
+            )
+        )
+
+        public companion object {
+            /** First line of a transfer stream, before the raw log bytes. */
+            public const val TRANSFER_PREFIX: String = "PITWALL-SOURCE-META v1"
+
+            public fun parseJson(text: String): SourceMeta? = runCatching {
+                val root = PitwallJson.parse(text) as? PitwallJson.Value.Object ?: return null
+                SourceMeta(
+                    sessionId = root.string("sid") ?: return null,
+                    formatVersion = root.number("fmt")?.toInt() ?: return null,
+                    expectedBytes = root.number("bytes")?.toLong() ?: return null,
+                    sha256 = root.string("sha256") ?: return null,
+                    complete = root.bool("complete") ?: return null
+                )
+            }.getOrNull()
+
+            /** Streams [file] through SHA-256; returns the lowercase hex digest. */
+            public fun sha256Hex(file: java.io.File): String {
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                file.inputStream().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        md.update(buf, 0, n)
+                    }
+                }
+                return md.digest().joinToString("") { "%02x".format(it) }
+            }
+        }
+    }
+
     /** Watch log metadata, stored as JSON in the header. */
     public data class Metadata(
         val sessionId: String,
