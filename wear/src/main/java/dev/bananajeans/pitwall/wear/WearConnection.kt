@@ -151,9 +151,9 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
             is Messages.Start -> onStart(message)
             is Messages.Stop -> onStop(message)
             is Messages.TransferAck -> transferQueue?.onAck(message)
+            is Messages.Result -> WatchResultsStore.save(context, message)
             is Messages.Status, is Messages.StartAck, is Messages.StopAck,
-            is Messages.Result, is Messages.Unknown ->
-                Unit // phone->watch only, or handled in later layers
+            is Messages.Unknown -> Unit // phone->watch only, or ignored
         }
     }
 

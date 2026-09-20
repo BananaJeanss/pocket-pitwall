@@ -4,7 +4,9 @@ import android.content.Context
 import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.Messages
+import dev.bananajeans.pitwall.protocol.WatchLogCodec
 import dev.bananajeans.pitwall.protocol.WatchLogImporter
+import dev.bananajeans.pitwall.protocol.WristAnalysis
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicReference
@@ -213,6 +215,27 @@ class WatchTransferManager private constructor(private val context: Context) {
             // never the watch's monotonic value from log metadata.
             val sync = WatchLink.captureSyncForSession(sessionId) ?: WatchLink.captureSyncForSession()
             val phoneStart = session.phoneStartElapsedNanos.takeIf { it > 0L }
+                ?: result.log.metadata.startedAtMonotonicNanos.let { watchStart ->
+                    // Legacy sessions recorded before the anchor existed:
+                    // map the watch monotonic start through the fit into the
+                    // phone domain rather than mixing epochs directly.
+                    sync?.let { it.phoneFromWatch(watchStart).toLong() }
+                }
+            // Derived driver-input metrics (issue #23): computed once at
+            // import from the raw log + sync fit; recomputable from raw data.
+            val analysis = runCatching {
+                WristAnalysis.analyze(
+                    samples = result.log.samples.filter { it.sensorType == 4 },
+                    fit = sync,
+                    durationSeconds = session.duration,
+                    phoneSessionStartNanos = phoneStart ?: 0L
+                )
+            }.getOrNull()
+            // HR summary is displayed on the watch in the results round-trip (layer 7);
+            // peak/average are derived from log.heartRate there without re-parsing here.
+            @Suppress("UNUSED_VARIABLE") val hrStats = result.log.heartRate.takeIf { it.isNotEmpty() }?.let { hr ->
+                Triple(hr.minOf { it.bpm }, hr.maxOf { it.bpm }, hr.map { it.bpm }.average())
+            }
             val info = WatchSessionInfo(
                 status = WatchSessionInfo.Status.IMPORTED,
                 deviceModel = result.log.metadata.deviceModel,
@@ -230,19 +253,47 @@ class WatchTransferManager private constructor(private val context: Context) {
                         quality = it.quality
                     )
                 },
-                logFile = logName,
                 phoneStartNanos = phoneStart,
-                metrics = null
+                logFile = logName,
+                metrics = analysis?.let { a ->
+                    WatchSessionInfo.Metrics(
+                        steeringSmoothness = if (a.usable) 1.0 - a.oscillation else null,
+                        correctionCount = if (a.usable) a.events.count { it.kind == WristAnalysis.EventKind.CORRECTION } else null,
+                        quality = when {
+                            !a.usable -> a.degradedReason
+                            else -> "ok"
+                        }
+                    )
+                }
             )
             store.save(session.copy(watch = info))
             SessionRepository.refresh()
+            // Push the compact summary back to the watch (issue #25).
+            WatchLink.sendResult(
+                Messages.Result(
+                    sessionId = sessionId,
+                    bestLapSeconds = dev.bananajeans.pitwall.core.Telemetry.laps(session.marks)
+                        .minByOrNull { it.duration() }?.duration()?.takeIf { it.isFinite() },
+                    lapCount = dev.bananajeans.pitwall.core.Telemetry.laps(session.marks).size,
+                    steeringSmoothness = info.metrics?.steeringSmoothness,
+                    correctionCount = info.metrics?.correctionCount,
+                    peakHr = result.log.heartRate.maxOfOrNull { it.bpm },
+                    averageHr = result.log.heartRate.map { it.bpm }.takeIf { it.isNotEmpty() }?.average()?.toInt(),
+                    watchDataQuality = info.metrics?.quality,
+                    notes = if (result.log.complete) null else "Watch log incomplete",
+                    // Immutable phone session creation wall-clock timestamp
+                    // (issue #25/#19 P1): stable chronological key across
+                    // reconnect/restart; never monotonic elapsed time.
+                    timestamp = session.created
+                )
+            )
         } catch (_: Exception) {
             // Session attachment is best-effort; the raw log remains stored.
         }
     }
 
+    /** Phone tells the watch to send its pending logs. */
     companion object {
-        /** Phone tells the watch to send its pending logs. */
         const val PATH_PULL = "/pitwall/log/pull"
 
         /**

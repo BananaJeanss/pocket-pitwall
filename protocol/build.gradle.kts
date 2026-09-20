@@ -3,6 +3,6 @@ plugins {
 }
 
 dependencies {
-    implementation(project(":core"))
+    api(project(":core"))
     testImplementation(kotlin("test"))
 }

@@ -1,5 +1,6 @@
 package dev.bananajeans.pitwall.wear
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -34,17 +36,29 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Watch app entry point. Deliberately glanceable:
- *  - recording status (large, unmistakable)
- *  - pending transfer counts
- *  - sensor diagnostics summary (scroll)
- *  - a manual test-record control for bench validation without the phone
+ * Watch app entry point (issue #25).
+ *
+ * State machine, glanceable-first:
+ *   Ready -> Recording -> Saved/Transferring -> Results
+ *
+ * Rules:
+ *  - Recording status is unmistakable (large REC), trustworthy with the
+ *    screen off (foreground service + wake lock do the real work).
+ *  - Phone disconnection is NOT an error while local logging is healthy:
+ *    the UI shows a quiet "phone away" note, never a failure.
+ *  - Results come from the phone's canonical analysis; the watch never
+ *    derives conflicting numbers.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Recover orphaned recordings from a previous process/watch restart.
         WatchLogStore(this).recover()
+        // BODY_SENSORS is needed only for optional heart-rate; IMU recording
+        // works without it (issue #24 tolerance contract).
+        if (HeartRateRecorder.needsPermission(this)) {
+            requestPermissions(arrayOf(Manifest.permission.BODY_SENSORS), 1)
+        }
         setContent {
             MaterialTheme {
                 WatchApp()
@@ -59,23 +73,46 @@ private fun WatchApp() {
     var status by remember { mutableStateOf(RecorderService.status) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf(-1) }
+    var connection by remember {
+        mutableStateOf((context.applicationContext as PitwallWatchApplication).connection.connectionState)
+    }
+    // Observe results reactively via LiveData
+    val resultsLiveData = WatchResultsStore.observeResults(context)
+    var results by remember { mutableStateOf(WatchResultsStore.list(context)) }
+    var showResult by remember { mutableStateOf(false) }
 
-    // Poll recorder status while the screen is on (watch UIs must stay cheap).
+    // Observe results LiveData for reactive updates
+    val lifecycleOwner = LocalLifecycleOwner.current
+    androidx.compose.runtime.LaunchedEffect(resultsLiveData) {
+        resultsLiveData.observe(lifecycleOwner, { newResults ->
+            results = newResults ?: emptyList()
+        })
+    }
+
+    // Poll for state changes
     DisposableEffect(Unit) {
+        val app = context.applicationContext as PitwallWatchApplication
         val thread = Thread {
             while (!Thread.currentThread().isInterrupted) {
                 status = RecorderService.status
+                connection = app.connection.connectionState
                 try { Thread.sleep(500) } catch (_: InterruptedException) { break }
             }
         }.apply { isDaemon = true; start() }
         onDispose { thread.interrupt() }
     }
 
-    // Refresh pending-transfer count when not recording (cheap, on demand).
-    if (pending < 0 || !status.recording) {
-        val store = remember { WatchLogStore(context) }
-        val count = remember(status.recording) { store.pendingTransfer().size }
-        if (count != pending) pending = count
+    // Pending transfer count: observed from the TransferQueue's LiveData so
+    // every ack/delete immediately updates it (issue #25 P2). No state-key
+    // heuristics that can go stale.
+    val pendingCountLive = (context.applicationContext as PitwallWatchApplication).transferQueue.observePendingCount()
+    androidx.compose.runtime.LaunchedEffect(pendingCountLive) {
+        pendingCountLive.observe(lifecycleOwner, { count ->
+            pending = count ?: 0
+        })
+    }
+    if (pending < 0) {
+        pending = (context.applicationContext as PitwallWatchApplication).transferQueue.pendingCount()
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -88,20 +125,19 @@ private fun WatchApp() {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            status.error?.let { message ->
-                Text(
-                    text = message,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center
-                )
-            }
-            if (status.recording) {
-                RecordingPanel(status)
-            } else {
-                IdlePanel(
+            when {
+                status.recording -> RecordingPanel(status, connection.phoneConnected)
+                showResult && results.isNotEmpty() -> ResultPanel(results.first(), onDone = { showResult = false })
+                else -> IdlePanel(
+                    context = context,
                     pending = pending.coerceAtLeast(0),
+                    phoneConnected = connection.phoneConnected,
                     showDiagnostics = showDiagnostics,
+                    resultsAvailable = results.isNotEmpty(),
+                    hasError = status.error != null,
+                    errorMessage = status.error,
                     onToggleDiagnostics = { showDiagnostics = !showDiagnostics },
+                    onShowResults = { showResult = true },
                     onStartTest = { startTestRecording(context) },
                     onStopTest = { stopTestRecording(context) }
                 )
@@ -112,7 +148,7 @@ private fun WatchApp() {
 }
 
 @Composable
-private fun RecordingPanel(status: RecorderStatus) {
+private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean) {
     Text(
         text = "REC",
         color = Color(0xFFFF5252),
@@ -129,18 +165,30 @@ private fun RecordingPanel(status: RecorderStatus) {
         color = if (status.healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
+    // Phone loss is NOT a failure while local logging is healthy (issue #25).
     Text(
-        text = "Screen can turn off",
+        text = when {
+            status.healthy && phoneConnected -> "phone connected"
+            status.healthy -> "phone away · logging safely on watch"
+            else -> "check watch storage"
+        },
         style = MaterialTheme.typography.labelSmall,
+        color = if (status.healthy) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
 }
 
 @Composable
 private fun IdlePanel(
+    context: Context,
     pending: Int,
+    phoneConnected: Boolean,
     showDiagnostics: Boolean,
+    resultsAvailable: Boolean,
+    hasError: Boolean,
+    errorMessage: String?,
     onToggleDiagnostics: () -> Unit,
+    onShowResults: () -> Unit,
     onStartTest: () -> Unit,
     onStopTest: () -> Unit
 ) {
@@ -149,16 +197,74 @@ private fun IdlePanel(
         style = MaterialTheme.typography.titleLarge,
         textAlign = TextAlign.Center
     )
-    Text(
-        text = if (pending == 0) "Ready"
-        else "$pending saved ${if (pending == 1) "log" else "logs"} waiting for phone",
-        textAlign = TextAlign.Center,
-        color = MaterialTheme.colorScheme.primary
-    )
+    when {
+        hasError -> {
+            // Show recorder error prominently - never fall through to "Ready"
+            Text(
+                "Recorder error: ${errorMessage ?: "unknown"}",
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
+            )
+            Button(onClick = onStartTest) { Text("Retry record") }
+        }
+        pending > 0 -> Text(
+            "$pending saved ${if (pending == 1) "log" else "logs"} waiting for phone",
+            color = MaterialTheme.colorScheme.primary,
+            textAlign = TextAlign.Center
+        )
+        resultsAvailable -> Button(onClick = onShowResults) { Text("Last result") }
+        else -> Text(
+            if (phoneConnected) "Ready · phone connected" else "Ready (phone optional)",
+            color = MaterialTheme.colorScheme.primary,
+            textAlign = TextAlign.Center
+        )
+    }
     Button(onClick = onStartTest) { Text("Test record") }
     Button(onClick = onToggleDiagnostics) {
         Text(if (showDiagnostics) "Hide sensors" else "Sensors")
     }
+}
+
+@Composable
+private fun ResultPanel(result: dev.bananajeans.pitwall.protocol.Messages.Result, onDone: () -> Unit) {
+    Text(
+        text = "Session results",
+        style = MaterialTheme.typography.titleMedium,
+        textAlign = TextAlign.Center
+    )
+    result.bestLapSeconds?.let {
+        Text("Best lap ${formatSeconds(it)}", color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center)
+    }
+    Text("${result.lapCount} ${if (result.lapCount == 1) "lap" else "laps"}", textAlign = TextAlign.Center)
+    result.steeringSmoothness?.let { smooth ->
+        val pct = (smooth * 100).toInt().coerceIn(0, 100)
+        Text("Steering smoothness ${pct}%", textAlign = TextAlign.Center)
+    }
+    result.correctionCount?.let { Text("$it corrections", textAlign = TextAlign.Center) }
+    if (result.peakHr != null || result.averageHr != null) {
+        Text(
+            "HR peak ${result.peakHr ?: "—"} · avg ${result.averageHr ?: "—"}",
+            textAlign = TextAlign.Center
+        )
+    }
+    result.watchDataQuality?.takeIf { it != "ok" }?.let { quality ->
+        Text(
+            "Watch data: $quality",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.Center
+        )
+    }
+    // Show notes (especially incomplete-log warnings)
+    result.notes?.takeIf { it.isNotBlank() }?.let { note ->
+        Text(
+            note,
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.labelSmall,
+            textAlign = TextAlign.Center
+        )
+    }
+    Button(onClick = onDone) { Text("Done") }
 }
 
 @Composable
@@ -200,3 +306,6 @@ private fun formatElapsed(seconds: Double): String {
     val total = seconds.toLong()
     return String.format(Locale.US, "%02d:%02d", total / 60, total % 60)
 }
+
+private fun formatSeconds(seconds: Double): String =
+    String.format(Locale.US, "%.2f", seconds)

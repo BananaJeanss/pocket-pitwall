@@ -87,6 +87,26 @@ class SessionStoreWatchTest {
         assertEquals(ClockSync.Quality.EXCELLENT, watch.sync?.quality)
         assertEquals(37.5e9, watch.sync?.offsetWatchMinusPhone!!, 1e3)
         assertEquals("watch.pwtch", watch.logFile)
+        // P0: the phone monotonic anchor is persisted with the session.
+        assertEquals(60_000_000_000L, watch.phoneStartNanos)
+    }
+
+    @Test
+    fun phoneStartElapsedNanosRoundTripsAndLegacyDefaultsToZero() {
+        // New sessions carry the phone monotonic anchor.
+        val anchored = phoneOnlySession().copy(id = "anchored-1", phoneStartElapsedNanos = 42_000_000_000L)
+        store.save(anchored)
+        assertEquals(42_000_000_000L, store.list().first { it.id == anchored.id }.phoneStartElapsedNanos)
+
+        // Old sessions recorded before the anchor existed keep working: the
+        // field is absent in JSON and defaults to 0 (no epoch mixing).
+        val dir = java.io.File(java.io.File(context.filesDir, "sessions"), "legacy-1").apply { mkdirs() }
+        java.io.File(dir, "session.json").writeText(
+            """{"schemaVersion":1,"id":"legacy-1","created":1730000000000,"title":"L",
+               "direction":"Normal","status":"complete","duration":1.0,"lengthMeters":0.0,
+               "sensors":"","notes":"","marks":[],"track":[],"pins":{}}"""
+        )
+        assertEquals(0L, store.list().first { it.id == "legacy-1" }.phoneStartElapsedNanos)
     }
 
     @Test
