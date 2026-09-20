@@ -1,7 +1,6 @@
 package dev.bananajeans.pitwall.protocol
 
 import java.io.File
-import java.security.MessageDigest
 
 /**
  * Phone-side import pipeline for transferred watch logs (issue #21).
@@ -32,12 +31,6 @@ class WatchLogImporter(private val storeDir: File) {
      * second call and never corrupts the stored copy. A *different* payload
      * for an existing session id is rejected (session ids are unique; a
      * mismatch means the watch reused an id or the transfer was mangled).
-     *
-     * Integrity check: if the log declares its own expected byte length and
-     * content hash (written by the watch at finalization), we verify that the
-     * received bytes match exactly. This allows accepting an intentionally
-     * incomplete *source* log (watch crash recovery) while rejecting a
-     * *transport-truncated* copy of any log.
      */
     fun import(sessionId: String, bytes: ByteArray): Result {
         if (!SESSION_ID.matches(sessionId)) return Result.Rejected("Invalid session id")
@@ -51,27 +44,12 @@ class WatchLogImporter(private val storeDir: File) {
             is WatchLogCodec.ReadResult.Complete -> read.log to true
             is WatchLogCodec.ReadResult.Incomplete -> read.log to false
         }
-        
-        // Integrity check: if metadata has expected length/hash, verify exact match
-        val metadata = log.metadata
-        if (metadata.expectedByteLength != null) {
-            if (bytes.size.toLong() != metadata.expectedByteLength) {
-                return Result.Rejected("Transport truncated: expected ${metadata.expectedByteLength} bytes, got ${bytes.size}")
-            }
-            // Only verify hash if it's non-zero (not a placeholder)
-            if (metadata.contentHash != null && metadata.contentHash != "0".repeat(64)) {
-                val computedHash = computeSha256Hex(bytes)
-                if (computedHash != metadata.contentHash) {
-                    return Result.Rejected("Content hash mismatch: expected ${metadata.contentHash}, got $computedHash")
-                }
-            }
-            // Exact length match - this is the intact source log, even if incomplete
-        } else if (!complete) {
-            // No integrity metadata and incomplete - could be truncated transport
-            // Reject to prevent deletion of intact watch copy
-            return Result.Rejected("Incomplete log without integrity metadata; transfer may be truncated")
+        // Reject incomplete logs - they may be truncated in transit and the watch
+        // still has the intact source. Only accept COMPLETE logs to prevent
+        // accidental deletion of valid watch copies on channel disconnect.
+        if (!complete) {
+            return Result.Rejected("Incomplete log (missing/invalid trailer); transfer may be truncated")
         }
-        
         if (log.metadata.sessionId != sessionId) {
             return Result.Rejected("Log metadata session id does not match transfer id")
         }
@@ -100,14 +78,6 @@ class WatchLogImporter(private val storeDir: File) {
         return Result.Imported(log.copy(complete = complete), destination)
     }
 
-    /** Validate a log file from storage without re-reading all bytes. */
-    fun validateStored(sessionId: String): Result {
-        val file = File(storeDir, "$sessionId.pwtch")
-        if (!file.isFile) return Result.Rejected("Not found")
-        val bytes = file.readBytes()
-        return import(sessionId, bytes)
-    }
-
     fun hasImported(sessionId: String): Boolean =
         SESSION_ID.matches(sessionId) && File(storeDir, "$sessionId.pwtch").isFile
 
@@ -122,11 +92,6 @@ class WatchLogImporter(private val storeDir: File) {
 
     private fun fsync(file: File) {
         java.io.RandomAccessFile(file, "r").use { it.channel.force(true) }
-    }
-
-    private fun computeSha256Hex(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
     }
 
     companion object {
