@@ -63,6 +63,9 @@ class WatchLogStore(private val context: Context) {
 
     fun isRecording(sessionId: String): Boolean = readState(sessionId)?.state == State.RECORDING
 
+    /** Public read for transfer/retention logic. */
+    fun stateOf(sessionId: String): State? = readState(sessionId)?.state
+
     fun startRecording(sessionId: String): File {
         val file = logFile(sessionId)
         file.parentFile!!.mkdirs()

@@ -103,8 +103,9 @@ class WatchLogCodecTest {
         samples(5).forEach { writer.appendSamples(4, listOf(it)) }
         writer.finish()
         val bytes = out.toByteArray()
-        // Flip a bit inside the last sample record (before the trailer).
-        bytes[bytes.size - 13 - 4] = (bytes[bytes.size - 13 - 4].toInt() xor 0x40).toByte()
+        // Flip a bit inside the payload (before the trailer).
+        // Trailer is now 85 bytes: 5 (magic) + 4 (crc) + 4 (len) + 8 (expectedLen) + 64 (hash)
+        bytes[bytes.size - 85 - 4] = (bytes[bytes.size - 85 - 4].toInt() xor 0x40).toByte()
 
         val result = runCatching { WatchLogCodec.read(ByteArrayInputStream(bytes)) }
         val outcome = result.getOrNull()

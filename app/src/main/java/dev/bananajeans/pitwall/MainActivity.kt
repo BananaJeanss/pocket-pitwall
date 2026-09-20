@@ -48,10 +48,15 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    private lateinit var transferManager: WatchTransferManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SessionRepository.initialize(applicationContext)
         WatchLink.initialize(applicationContext)
+        transferManager = WatchTransferManager(this)
+        transferManager.start()
+        transferManager.pullPending()
         setContent {
             var settings by remember { mutableStateOf(AppSettings.read(this)) }
             val dark = when (settings.theme) { "Dark" -> true; "Light" -> false; else -> isSystemInDarkTheme() }

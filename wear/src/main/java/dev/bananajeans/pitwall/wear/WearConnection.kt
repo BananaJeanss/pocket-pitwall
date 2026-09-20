@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
  * The watch recorder itself never touches this class: losing the phone
  * mid-session only degrades coordination, never logging.
  */
-class WearConnection(private val context: Context) {
+class WearConnection(private val context: Context, private val transferQueue: TransferQueue? = null) {
 
     data class ConnectionState(
         val phoneConnected: Boolean = false,
@@ -66,6 +66,11 @@ class WearConnection(private val context: Context) {
     private val diskExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     private val messageListener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
+        if (event.path == TransferQueue.PATH_PULL) {
+            // Phone asked us to send pending logs; open one channel per log.
+            transferQueue?.serveAll()
+            return@OnMessageReceivedListener
+        }
         handleMessage(event)
     }
 
@@ -82,6 +87,7 @@ class WearConnection(private val context: Context) {
                 kotlinx.coroutines.delay(10_000)
             }
         }
+        transferQueue?.start()
     }
 
     fun stop() {
@@ -144,8 +150,9 @@ class WearConnection(private val context: Context) {
             }
             is Messages.Start -> onStart(message)
             is Messages.Stop -> onStop(message)
+            is Messages.TransferAck -> transferQueue?.onAck(message)
             is Messages.Status, is Messages.StartAck, is Messages.StopAck,
-            is Messages.Result, is Messages.TransferAck, is Messages.Unknown ->
+            is Messages.Result, is Messages.Unknown ->
                 Unit // phone->watch only, or handled in later layers
         }
     }
@@ -153,7 +160,7 @@ class WearConnection(private val context: Context) {
     private fun onStart(message: Messages.Start) {
         // Check if this is a new start command or a duplicate/retry
         val isNew = watchControl.shouldStart(message.sessionId, message.startSeq)
-        
+
         if (!isNew) {
             // Duplicate: replay the actual cached result if available
             val result = watchControl.getStartResult(message.sessionId, message.startSeq)
@@ -200,14 +207,14 @@ class WearConnection(private val context: Context) {
             .putExtra(RecorderService.EXTRA_SESSION_ID, message.sessionId)
             .putExtra(RecorderService.EXTRA_TITLE, message.title)
             .putExtra(RecorderService.EXTRA_DIRECTION, message.direction)
-        
+
         val ackCallback = object : RecorderService.Companion.RecordingCallback {
             override fun onRecordingStarted(success: Boolean) {
                 watchControl.onStartCompleted(
-                    message.sessionId, 
-                    message.startSeq, 
-                    success, 
-                    BuildConfig.VERSION_NAME, 
+                    message.sessionId,
+                    message.startSeq,
+                    success,
+                    BuildConfig.VERSION_NAME,
                     Messages.PROTOCOL_VERSION
                 )
                 send(Messages.StartAck(message.sessionId, success, BuildConfig.VERSION_NAME, Messages.PROTOCOL_VERSION))
