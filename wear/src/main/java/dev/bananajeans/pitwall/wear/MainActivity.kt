@@ -126,7 +126,7 @@ private fun WatchApp() {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             when {
-                status.recording -> RecordingPanel(status, connection.phoneConnected)
+                status.recording -> RecordingPanel(status, connection.phoneConnected, onStop = { stopTestRecording(context) })
                 showResult && results.isNotEmpty() -> ResultPanel(results.first(), onDone = { showResult = false })
                 else -> IdlePanel(
                     context = context,
@@ -148,7 +148,7 @@ private fun WatchApp() {
 }
 
 @Composable
-private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean) {
+private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onStop: () -> Unit) {
     Text(
         text = "REC",
         color = Color(0xFFFF5252),
@@ -176,6 +176,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean) {
         color = if (status.healthy) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
+    Button(onClick = onStop) { Text("Stop & save") }
 }
 
 @Composable
@@ -219,7 +220,7 @@ private fun IdlePanel(
             textAlign = TextAlign.Center
         )
     }
-    Button(onClick = onStartTest) { Text("Test record") }
+    Button(onClick = onStartTest) { Text("Record now") }
     Button(onClick = onToggleDiagnostics) {
         Text(if (showDiagnostics) "Hide sensors" else "Sensors")
     }
@@ -292,7 +293,7 @@ private fun startTestRecording(context: Context) {
         Intent(context, RecorderService::class.java)
             .setAction(RecorderService.ACTION_START)
             .putExtra(RecorderService.EXTRA_SESSION_ID, UUID.randomUUID().toString())
-            .putExtra(RecorderService.EXTRA_TITLE, "Watch test recording")
+            .putExtra(RecorderService.EXTRA_TITLE, "Standalone watch recording")
     )
 }
 
