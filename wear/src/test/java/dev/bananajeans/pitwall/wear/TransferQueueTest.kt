@@ -83,6 +83,7 @@ class TransferQueueTest {
         assertEquals(listOf("one"), attempts)
         release.complete(Unit)
         first?.join()
+        Unit
     }
 
     @Test fun acceptedAckRemovesPendingButKeepsRecoveryCopy() {
