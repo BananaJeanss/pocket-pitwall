@@ -56,9 +56,12 @@ class MainActivity : ComponentActivity() {
         // recreation can happen while a live foreground recorder owns the log.
         // BODY_SENSORS is needed only for optional heart-rate; IMU recording
         // works without it (issue #24 tolerance contract).
-        if (HeartRateRecorder.needsPermission(this)) {
-            requestPermissions(arrayOf(Manifest.permission.BODY_SENSORS), 1)
-        }
+        val permissions = mutableListOf<String>()
+        if (HeartRateRecorder.needsPermission(this)) permissions.add(Manifest.permission.BODY_SENSORS)
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (permissions.isNotEmpty()) requestPermissions(permissions.toTypedArray(), 1)
         setContent {
             MaterialTheme {
                 WatchApp()

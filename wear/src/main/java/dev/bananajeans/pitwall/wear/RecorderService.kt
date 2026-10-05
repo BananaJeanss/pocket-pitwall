@@ -310,16 +310,9 @@ class RecorderService : Service(), SensorEventListener {
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        if (closing || writer == null || sensor == null) return
-        try {
-            writer?.appendAccuracyEvent(
-                WatchLogCodec.AccuracyEvent(sensor.type, SystemClock.elapsedRealtimeNanos(), accuracy)
-            )
-            stream?.fd?.sync()
-        } catch (e: Exception) {
-            update { it.copy(healthy = false, error = "Logging interrupted: ${e.message}") }
-            finish(complete = false)
-        }
+        // Each sample already carries SensorEvent.accuracy. This callback has
+        // no sensor timestamp: using processing time advances the codec's
+        // timestamp chain past buffered/delayed samples and stops recording.
     }
 
     private fun flush(sensorType: Int) {

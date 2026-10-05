@@ -17,6 +17,26 @@ Android motion telemetry for indoor karting. Record with the screen locked, anno
 
 The app checks for stable releases in Settings and, if enabled, once per day on launch. It opens the release page for you to download and install. It never silently installs software.
 
+## Wear OS
+
+Install both APKs from the same stable release: the phone and watch use the
+same app id and release signing key for Wear Data Layer communication.
+Open both apps once and grant the watch's optional sensor and notification
+permissions. Before track use, record a short session with the watch screen
+off, stop and confirm that it appears in the phone's Sessions list.
+
+- **Phone + watch:** keep the watch app open while starting on the phone;
+  verify REC and an increasing sample count on the watch before locking it.
+- **Watch only:** press **Record now** on the watch. The phone can be away.
+  Press **Stop & save** after the run, reconnect and open the phone app.
+  Saved watch logs sync automatically, matching a nearby phone session when
+  available or creating a separate watch session for review and ZIP export.
+- Raw accelerometer readings from watch-only sessions include gravity.
+  Steering metrics need usable session clock sync; unsynchronized recordings
+  keep their raw data without inventing synchronized analysis.
+- Both recorders have a one-hour limit. A physical device smoke test remains
+  necessary; CI cannot reproduce vendor battery management or radio pairing.
+
 ## Screens
 
 | Screen | Controls |
