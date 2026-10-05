@@ -2,7 +2,7 @@ package dev.bananajeans.pitwall.wear
 
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.wear.compose.material3.MaterialTheme
 import dev.bananajeans.pitwall.protocol.Messages
@@ -16,7 +16,7 @@ import org.junit.runner.Description
 
 /** Captures the production UI on a genuine round Wear OS system image. */
 class WatchScreenshotTest {
-    @get:Rule(order = 0) val ui = createComposeRule()
+    @get:Rule(order = 0) val ui = createAndroidComposeRule<ScreenshotActivity>()
     @get:Rule(order = 1) val failureScreenshot = object : TestWatcher() {
         override fun failed(error: Throwable, description: Description) {
             runCatching { capture("failure-${description.methodName}") }
@@ -39,7 +39,13 @@ class WatchScreenshotTest {
         }
     }
 
-    private fun screenshot(name: String) { ui.waitForIdle(); capture(name) }
+    private fun screenshot(name: String) {
+        ui.waitUntil(5000) { ui.activity.hasWindowFocus() }
+        ui.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5000)
+        capture(name)
+    }
 
     @Test fun readyAndSensors() {
         val diagnostics = mutableStateOf(false)

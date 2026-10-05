@@ -10,6 +10,7 @@ import dev.bananajeans.pitwall.core.Telemetry
 import org.junit.Rule
 import org.junit.Test
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 
@@ -24,6 +25,9 @@ class NavigationTest {
     private fun screenshot(name: String) {
         require(name.matches(Regex("[a-zA-Z0-9-]+")))
         ui.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        // Semantics can update before SurfaceFlinger presents the new frame.
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5000)
         capture(name)
     }
 
@@ -38,6 +42,17 @@ class NavigationTest {
         }
         shell("mkdir -p /data/local/tmp/pitwall-screenshots")
         shell("screencap -p /data/local/tmp/pitwall-screenshots/$name.png")
+    }
+
+    private fun assertStatusBarContrast(light: Boolean) {
+        val bitmap = checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        try {
+            val color = bitmap.getPixel(bitmap.width / 2, 2)
+            val brightness = (android.graphics.Color.red(color) + android.graphics.Color.green(color) +
+                android.graphics.Color.blue(color)) / 3.0
+            assertTrue("Status-bar background must match ${if (light) "light" else "dark"} icons",
+                if (light) brightness > 180 else brightness < 90)
+        } finally { bitmap.recycle() }
     }
 
     @Test fun destinationsAndSystemBack() {
@@ -65,11 +80,19 @@ class NavigationTest {
         ui.onAllNodesWithText("Settings").onLast().performClick()
         val current=AppSettings.read(ui.activity)
         ui.onNodeWithText("Theme: ${current.theme} ▾").performClick()
+        ui.onNodeWithText("Dark",useUnmergedTree=true).performClick()
+        ui.activityRule.scenario.recreate()
+        ui.onNodeWithText("Theme: Dark ▾").assertIsDisplayed()
+        assertEquals("Dark",AppSettings.read(ui.activity).theme)
+        screenshot("10-dark-settings")
+        assertStatusBarContrast(light = false)
+        ui.onNodeWithText("Theme: Dark ▾").performClick()
         ui.onNodeWithText("Light",useUnmergedTree=true).performClick()
         ui.activityRule.scenario.recreate()
         ui.onNodeWithText("Theme: Light ▾").assertIsDisplayed()
         assertEquals("Light",AppSettings.read(ui.activity).theme)
         screenshot("03-light-settings")
+        assertStatusBarContrast(light = true)
     }
 
     @Test fun savedSessionReviewAndBack() {
@@ -121,15 +144,23 @@ class NavigationTest {
             InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
                 ui.activity.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        val title = "Recording screenshot fixture"
+        ui.onNodeWithText("Track").performTextReplacement(title)
+        closeSoftKeyboard()
         ui.onNodeWithText("Start recording").performClick()
         try {
-            ui.waitUntil(5000) { RecorderService.active.value }
+            // Wait past service initialization so a transient active flag
+            // cannot hide a failed sensor/foreground-service start.
+            ui.waitUntil(5000) { RecorderService.active.value && RecorderService.elapsed.value >= 1.0 }
             ui.onNodeWithText("Recording · screen can be locked").assertIsDisplayed()
             ui.onNodeWithText("Stop & save").assertIsDisplayed()
             screenshot("09-recording")
             ui.onNodeWithText("Stop & save").performClick()
             ui.waitUntil(5000) { !RecorderService.active.value }
             ui.onNodeWithText("Start recording").assertIsDisplayed()
+            ui.waitUntil(5000) {
+                SessionStore(ui.activity).list().any { it.title == title && it.status == "complete" && it.duration >= 1.0 }
+            }
         } finally {
             ui.activity.startService(android.content.Intent(ui.activity, RecorderService::class.java)
                 .setAction(RecorderService.STOP))
