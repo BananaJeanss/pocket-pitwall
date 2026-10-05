@@ -162,7 +162,7 @@ class WatchLogImporter(private val storeDir: File) {
                 }
             }
             val read = try {
-                WatchLogCodec.read(temp.inputStream())
+                temp.inputStream().use { WatchLogCodec.read(it) }
             } catch (e: WatchLogCodec.CorruptLogException) {
                 temp.delete()
                 return Result.Rejected("Corrupt log: ${e.message}")
@@ -212,7 +212,7 @@ class WatchLogImporter(private val storeDir: File) {
 
     /** Convenience overload for a file source. */
     fun importFromFile(sessionId: String, file: File, sourceMeta: WatchLogCodec.SourceMeta? = null): Result =
-        importFromFile(sessionId, file.inputStream(), file.length(), sourceMeta)
+        file.inputStream().use { importFromFile(sessionId, it, file.length(), sourceMeta) }
 
     private fun checkLength(sessionId: String, byteCount: Long, sourceMeta: WatchLogCodec.SourceMeta?): Result.Rejected? {
         sourceMeta?.let { meta ->

@@ -6,11 +6,13 @@ import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.Messages
 import dev.bananajeans.pitwall.protocol.WatchLogTransfer
 import java.io.File
-import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -23,20 +25,46 @@ import kotlinx.coroutines.tasks.await
  *  2. Watch opens one ChannelClient channel per queued log at
  *     /pitwall/log/<sessionId> and streams log.pwtch into it.
  *  3. Phone validates + stores, then sends TransferAck(ok).
- *  4. Watch releases (deletes) the local copy only on ok=true; on ok=false
- *     it backs off and the phone pulls again later.
+ *  4. Watch marks the local copy imported only on ok=true and retains it
+ *     for seven days. Each failed log retries independently.
  *
  * The queue is re-derived from disk on every step, so app/watch restarts
  * cannot lose, orphan or double-send a log (duplicate opens are tolerated
  * by the phone's idempotent import).
  */
-class TransferQueue(private val context: Context) {
-
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+class TransferQueue internal constructor(
+    private val context: Context,
+    private val transport: Transport = WearTransport(context),
+    private val now: () -> Long = System::currentTimeMillis,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+) {
     private val store = WatchLogStore(context)
-    private val channelClient by lazy { Wearable.getChannelClient(context) }
-    private val messageClient by lazy { Wearable.getMessageClient(context) }
-    private val nodeClient by lazy { Wearable.getNodeClient(context) }
+    private var servingJob: Job? = null
+    private val retryAfter = ConcurrentHashMap<String, Long>()
+
+    internal interface Transport {
+        suspend fun connectedNodes(): List<String>
+        suspend fun send(nodeId: String, sessionId: String, file: File, metadata: dev.bananajeans.pitwall.protocol.WatchLogCodec.SourceMeta)
+    }
+
+    private class WearTransport(context: Context) : Transport {
+        private val channels = Wearable.getChannelClient(context)
+        private val nodes = Wearable.getNodeClient(context)
+        override suspend fun connectedNodes() = nodes.connectedNodes.await().map { it.id }
+        override suspend fun send(nodeId: String, sessionId: String, file: File, metadata: dev.bananajeans.pitwall.protocol.WatchLogCodec.SourceMeta) {
+            val channel = channels.openChannel(nodeId, channelPath(sessionId)).await()
+            try {
+                channels.getOutputStream(channel).await().use { output ->
+                    file.inputStream().use { input -> WatchLogTransfer.write(input, metadata, output) }
+                }
+                // The receiver closes the channel after consuming the stream.
+                // Closing here could invalidate bytes still buffered in transit.
+            } catch (e: Exception) {
+                runCatching { channels.close(channel).await() }
+                throw e
+            }
+        }
+    }
 
     /** Live pending-transfer count for the UI (issue #25 P2). Posted on
      *  every queue mutation (ack/delete/serve), so the count can no longer
@@ -51,9 +79,6 @@ class TransferQueue(private val context: Context) {
             pendingCountLive.postValue(count)
         }
     }
-
-    /** Backoff timestamp after a NACK; pull messages during backoff are ignored. */
-    @Volatile private var retryAfter: Long = 0
 
     companion object {
         /** Phone asks the watch to send its pending logs. */
@@ -75,37 +100,41 @@ class TransferQueue(private val context: Context) {
      * Responds to a pull request: opens one channel per pending log per
      * connected phone node. Idempotent; safe on duplicate requests.
      */
-    fun serveAll() {
+    @Synchronized fun serveAll(): Job? {
         refreshPendingCount()
-        if (System.currentTimeMillis() < retryAfter) return
-        if (RecorderService.status.recording) return // don't steal bandwidth mid-session
-        val pending = store.pendingTransfer()
-        if (pending.isEmpty()) return
-        scope.launch {
-            runCatching {
-                val nodes = nodeClient.connectedNodes.await()
+        if (RecorderService.status.recording) return null // don't steal bandwidth mid-session
+        servingJob?.takeIf { it.isActive }?.let { return it }
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val nodes = transport.connectedNodes()
                 for (node in nodes) {
-                    for (entry in pending) {
-                        openAndStream(node.id, entry.sessionId)
+                    for (entry in store.pendingTransfer()) {
+                        if (RecorderService.status.recording) break
+                        if (now() < (retryAfter[entry.sessionId] ?: 0L)) continue
+                        if (store.stateOf(entry.sessionId) != WatchLogStore.State.FINALIZED) continue
+                        // A missing/broken first log must not abort the batch.
+                        runCatching { openAndStream(node, entry.sessionId) }.onFailure {
+                            retryAfter[entry.sessionId] = now() + 10_000
+                            android.util.Log.w("PitwallSync", "Could not send ${entry.sessionId}", it)
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                android.util.Log.w("PitwallSync", "Could not discover phone", e)
+            } finally {
+                refreshPendingCount()
             }
         }
+        servingJob = job
+        job.start()
+        return job
     }
 
     private suspend fun openAndStream(nodeId: String, sessionId: String) {
         val file: File = store.logFile(sessionId)
-        if (!file.isFile) return
-        val metadata = store.sourceMeta(sessionId) ?: return
-        val channel = channelClient.openChannel(nodeId, channelPath(sessionId)).await()
-        try {
-            channelClient.getOutputStream(channel).await().use { output ->
-                file.inputStream().use { input -> WatchLogTransfer.write(input, metadata, output) }
-                output.flush()
-            }
-        } catch (_: Exception) {
-            runCatching { channelClient.close(channel) }
-        }
+        require(file.isFile) { "Missing watch log $sessionId" }
+        val metadata = requireNotNull(store.sourceMeta(sessionId)) { "Missing integrity metadata $sessionId" }
+        transport.send(nodeId, sessionId, file, metadata)
     }
 
     /**
@@ -115,12 +144,12 @@ class TransferQueue(private val context: Context) {
      */
     fun onAck(message: Messages.TransferAck) {
         if (!message.accepted) {
-            retryAfter = System.currentTimeMillis() + 60_000
+            retryAfter[message.logId] = now() + 10_000
             return
         }
+        retryAfter.remove(message.logId)
         if (store.stateOf(message.logId) == WatchLogStore.State.FINALIZED) {
             store.markImported(message.logId)
-            store.delete(message.logId)
         }
         refreshPendingCount()
     }

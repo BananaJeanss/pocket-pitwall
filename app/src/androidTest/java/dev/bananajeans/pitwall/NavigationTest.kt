@@ -75,6 +75,9 @@ class NavigationTest {
         pressBack()
         ui.onNodeWithText("Start recording").assertIsDisplayed()
         ui.onAllNodesWithText("Sessions").onLast().performClick()
+        ui.onNodeWithText("Watch sync").assertIsDisplayed()
+        ui.onNodeWithText("Sync watch now").performClick()
+        screenshot("11-watch-sync")
         pressBack()
         ui.onNodeWithText("Start recording").assertIsDisplayed()
     }
@@ -115,7 +118,7 @@ class NavigationTest {
         ui.waitUntil(5000) { SessionRepository.sessions.value.any { it.id==fixture.id } }
         ui.onAllNodesWithText("Sessions").onLast().performClick()
         screenshot("06-sessions")
-        ui.onNodeWithText(fixture.title).performClick()
+        ui.onNodeWithText(fixture.title).performScrollTo().performClick()
         ui.onNodeWithText("Lap sheet").assertIsDisplayed()
         screenshot("04-lap-sheet")
         ui.onNodeWithText("Timeline").performClick()
@@ -133,7 +136,7 @@ class NavigationTest {
         ui.waitUntil(5000) { SessionStore(ui.activity).list().any { it.id==fixture.id && it.notes=="Persist across recreation" } }
         closeSoftKeyboard()
         pressBack()
-        ui.onNodeWithText(fixture.title).assertIsDisplayed()
+        ui.onNodeWithText(fixture.title).performScrollTo().assertIsDisplayed()
         ui.runOnIdle {
             SessionRepository.save(fixture.copy(notes="Queued write"))
             SessionRepository.delete(fixture.id)

@@ -86,5 +86,42 @@ class WatchOnlyImportTest {
         assertEquals(1, store.list().size)
         assertNotNull(store.list().single().watch)
         assertEquals("phone samples stay intact", store.raw(phone.id).readText())
+        WatchTransferManager(context).attachToSession("standalone-overlap", imported("standalone-overlap"))
+        assertEquals("A replay must find the original phone association", 1, store.list().size)
+        assertEquals("standalone-overlap", store.list().single().watch!!.sourceSessionId)
+    }
+
+    @Test fun multipleCompletedWatchLogsAllBecomeVisibleSessions() {
+        val manager = WatchTransferManager(context)
+        for (id in listOf("heat-1", "heat-2", "heat-3")) {
+            val result = imported(id)
+            val meta = WatchLogCodec.SourceMeta(id, WatchLogCodec.FORMAT_VERSION,
+                result.storedAt.length(), WatchLogCodec.SourceMeta.sha256Hex(result.storedAt), true)
+            manager.importAndAttach(id, result.storedAt, meta)
+        }
+        assertEquals(setOf("heat-1", "heat-2", "heat-3"), store.list().map { it.id }.toSet())
+        assertTrue(store.list().all { it.watch?.status == WatchSessionInfo.Status.IMPORTED })
+    }
+
+    @Test fun attachmentFailureIsReportedAndRawImportCanBeRepairedOnRetry() {
+        val result = imported("blocked")
+        val meta = WatchLogCodec.SourceMeta("blocked", WatchLogCodec.FORMAT_VERSION,
+            result.storedAt.length(), WatchLogCodec.SourceMeta.sha256Hex(result.storedAt), true)
+        val obstruction = java.io.File(context.filesDir, "sessions/blocked")
+        obstruction.writeText("Cannot create session folder")
+        val manager = WatchTransferManager(context)
+        assertThrows(Exception::class.java) { manager.importAndAttach("blocked", result.storedAt, meta) }
+        assertTrue(result.storedAt.isFile)
+        assertTrue(store.list().isEmpty())
+        obstruction.delete()
+        assertTrue(manager.importAndAttach("blocked", result.storedAt, meta) is WatchLogImporter.Result.Duplicate)
+        assertNotNull(store.list().single().watch)
+    }
+
+    @Test fun manifestCanReceiveWatchChannelsWithoutAnActivity() {
+        val services = context.packageManager.queryIntentServices(android.content.Intent(
+            "com.google.android.gms.wearable.CHANNEL_EVENT").setData(android.net.Uri.parse(
+                "wear://watch/pitwall/log/heat-2")), 0)
+        assertTrue(services.any { it.serviceInfo.name == PhoneDataLayerService::class.java.name && it.serviceInfo.exported })
     }
 }

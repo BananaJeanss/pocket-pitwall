@@ -10,6 +10,12 @@
         <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>
+        <service android:name=".PhoneDataLayerService" android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.CHANNEL_EVENT" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/pitwall/log/" />
+            </intent-filter>
+        </service>
         <service android:name=".RecorderService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User initiated offline motion sensor recording with screen locked, explicitly stopped by user or after one hour" />
         </service>

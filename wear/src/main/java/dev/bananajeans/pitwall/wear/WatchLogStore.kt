@@ -77,8 +77,9 @@ class WatchLogStore(private val context: Context) {
     fun markFinalized(sessionId: String, complete: Boolean) {
         val current = readState(sessionId)
         if (current?.state == State.IMPORTED) return // never downgrade
-        writeState(sessionId, State.FINALIZED, complete)
         writeSourceMeta(sessionId, complete)
+        // Publish to the transfer queue only after its integrity sidecar exists.
+        writeState(sessionId, State.FINALIZED, complete)
     }
 
     /** Reads the durable source sidecar for a log, if one was written. */
