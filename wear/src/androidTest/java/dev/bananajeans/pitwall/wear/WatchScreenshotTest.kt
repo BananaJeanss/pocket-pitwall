@@ -2,6 +2,7 @@ package dev.bananajeans.pitwall.wear
 
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.core.app.ActivityScenario
@@ -45,6 +46,7 @@ class WatchScreenshotTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         // The cold Wear OS launch overlay can outlive the first Compose frame.
         ui.waitUntil(20000) { ui.activity.hasWindowFocus() }
+        ui.onRoot().captureToImage().asAndroidBitmap().recycle()
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5000)
         capture(name)
     }
@@ -133,6 +135,7 @@ class WatchScreenshotTest {
             ui.waitUntil(20000) { activity?.hasWindowFocus() == true }
             ui.onNodeWithText("Ready (phone optional)").assertIsDisplayed()
             ui.onNodeWithText("Record now").assertIsDisplayed()
+            ui.onRoot().captureToImage().asAndroidBitmap().recycle()
             instrumentation.uiAutomation.waitForIdle(250, 5000)
             capture("09-production-ready")
         }

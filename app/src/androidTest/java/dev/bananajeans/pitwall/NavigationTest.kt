@@ -2,6 +2,7 @@ package dev.bananajeans.pitwall
 
 import java.io.FileInputStream
 import androidx.compose.ui.test.*
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.espresso.Espresso.pressBack
 import androidx.test.espresso.Espresso.closeSoftKeyboard
@@ -26,7 +27,9 @@ class NavigationTest {
         require(name.matches(Regex("[a-zA-Z0-9-]+")))
         ui.waitForIdle()
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        // Semantics can update before SurfaceFlinger presents the new frame.
+        // Compose's PixelCopy capture forces a completed draw before the
+        // whole-device capture, which also includes the system bars.
+        ui.onRoot().captureToImage().asAndroidBitmap().recycle()
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5000)
         capture(name)
     }
