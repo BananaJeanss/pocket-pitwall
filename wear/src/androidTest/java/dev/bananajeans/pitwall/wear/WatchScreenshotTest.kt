@@ -9,6 +9,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.wear.compose.material3.MaterialTheme
 import dev.bananajeans.pitwall.protocol.Messages
 import java.io.FileInputStream
+import java.io.File
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -46,7 +47,27 @@ class WatchScreenshotTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         // The cold Wear OS launch overlay can outlive the first Compose frame.
         ui.waitUntil(20000) { ui.activity.hasWindowFocus() }
-        ui.onRoot().captureToImage().asAndroidBitmap().recycle()
+        val rendered = ui.onRoot().captureToImage().asAndroidBitmap()
+        try {
+            if (name.startsWith("03-") || name.startsWith("04-")) {
+                var redPixels = 0
+                for (y in 0 until rendered.height) for (x in 0 until rendered.width) {
+                    val pixel = rendered.getPixel(x, y)
+                    if (android.graphics.Color.red(pixel) > 200 &&
+                        android.graphics.Color.green(pixel) < 150 && android.graphics.Color.blue(pixel) < 150) redPixels++
+                }
+                assertTrue("REC must be present in the rendered image, including while offline", redPixels > 20)
+            }
+            val file = File(ui.activity.cacheDir, "$name-render.png")
+            file.outputStream().use { assertTrue(rendered.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) }
+            val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+            automation.executeShellCommand("mkdir -p /data/local/tmp/pitwall-screenshots").use { fd ->
+                FileInputStream(fd.fileDescriptor).use { it.readBytes() }
+            }
+            automation.executeShellCommand("sh -c 'run-as ${ui.activity.packageName} cat ${file.absolutePath} > /data/local/tmp/pitwall-screenshots/$name-render.png'").use { fd ->
+                FileInputStream(fd.fileDescriptor).use { it.readBytes() }
+            }
+        } finally { rendered.recycle() }
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5000)
         capture(name)
     }
