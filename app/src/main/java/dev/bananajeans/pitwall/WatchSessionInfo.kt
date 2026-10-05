@@ -29,7 +29,9 @@ data class WatchSessionInfo(
     /** Log file name inside the session folder (null until imported). */
     val logFile: String?,
     /** Derived watch metrics (layer 6 writes these). */
-    val metrics: Metrics?
+    val metrics: Metrics?,
+    /** Durable identity when a standalone watch log matches a different phone id. */
+    val sourceSessionId: String? = null
 ) {
 
     enum class Status { PENDING, IMPORTED, UNAVAILABLE }
@@ -73,6 +75,7 @@ data class WatchSessionInfo(
         } ?: PitwallJson.Value.Null
         return PitwallJson.obj(
             "status" to PitwallJson.s(status.name),
+            "sourceSessionId" to (sourceSessionId?.let { PitwallJson.s(it) } ?: PitwallJson.Value.Null),
             "device" to PitwallJson.s(deviceModel),
             "app" to PitwallJson.s(watchAppVersion),
             "complete" to PitwallJson.b(logComplete),
@@ -125,6 +128,7 @@ data class WatchSessionInfo(
             }
             return WatchSessionInfo(
                 status = status,
+                sourceSessionId = obj.string("sourceSessionId"),
                 deviceModel = obj.string("device") ?: "unknown",
                 watchAppVersion = obj.string("app") ?: "unknown",
                 logComplete = obj.bool("complete") ?: false,

@@ -65,17 +65,17 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
     // finalization) that must not run on the message-handler thread.
     private val diskExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
-    private val messageListener = MessageClient.OnMessageReceivedListener { event: MessageEvent ->
+    internal fun onMessage(event: MessageEvent) {
         if (event.path == TransferQueue.PATH_PULL) {
             // Phone asked us to send pending logs; open one channel per log.
             transferQueue?.serveAll()
-            return@OnMessageReceivedListener
+            return
         }
         handleMessage(event)
     }
 
     fun start() {
-        messageClient.addListener(messageListener)
+        // Messages arrive through WatchDataLayerService, including cold starts.
         refreshNodes()
         // Application recovery has completed before listeners are registered.
         // Running another recovery asynchronously can finalize a new live log.
@@ -89,7 +89,6 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
     }
 
     fun stop() {
-        messageClient.removeListener(messageListener)
         scope.cancel()
     }
 
@@ -99,6 +98,7 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
             val connected = phone != null
             val changed = connected != state.get().phoneConnected || phone?.displayName != state.get().phoneName
             state.set(ConnectionState(connected, phone?.displayName, state.get().lastSyncFit))
+            if (changed && connected) transferQueue?.serveAll()
             if (changed) listener?.invoke()
         }
     }

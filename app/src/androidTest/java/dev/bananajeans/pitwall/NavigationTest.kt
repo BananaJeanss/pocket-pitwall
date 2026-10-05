@@ -75,6 +75,9 @@ class NavigationTest {
         pressBack()
         ui.onNodeWithText("Start recording").assertIsDisplayed()
         ui.onAllNodesWithText("Sessions").onLast().performClick()
+        ui.onNodeWithText("Watch sync").assertIsDisplayed()
+        ui.onNodeWithText("Sync watch now").performClick()
+        screenshot("11-watch-sync")
         pressBack()
         ui.onNodeWithText("Start recording").assertIsDisplayed()
     }
