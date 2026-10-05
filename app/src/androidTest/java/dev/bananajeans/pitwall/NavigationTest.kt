@@ -10,13 +10,25 @@ import dev.bananajeans.pitwall.core.Telemetry
 import org.junit.Rule
 import org.junit.Test
 import org.junit.Assert.assertEquals
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 
 class NavigationTest {
-    @get:Rule val ui = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 0) val ui = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 1) val failureScreenshot = object : TestWatcher() {
+        override fun failed(error: Throwable, description: Description) {
+            runCatching { capture("failure-${description.methodName}") }
+        }
+    }
 
     private fun screenshot(name: String) {
         require(name.matches(Regex("[a-zA-Z0-9-]+")))
         ui.waitForIdle()
+        capture(name)
+    }
+
+    private fun capture(name: String) {
+        require(name.matches(Regex("[a-zA-Z0-9-]+")))
         val automation=InstrumentationRegistry.getInstrumentation().uiAutomation
         // Shell-owned output survives the test runner uninstalling the app.
         fun shell(command: String) {
@@ -63,17 +75,30 @@ class NavigationTest {
     @Test fun savedSessionReviewAndBack() {
         val fixture=Session(title="UI regression fixture",status="complete",duration=50.0,
             marks=listOf(Telemetry.Mark(5.0,"SF",false),Telemetry.Mark(45.0,"SF",false)))
-        SessionStore(ui.activity).save(fixture)
+        val store = SessionStore(ui.activity)
+        store.save(fixture)
+        store.raw(fixture.id).writeText(buildString {
+            appendLine("elapsed_s,sensor_type,x,y,z,w,accuracy")
+            for (i in 0..1000) {
+                val t = i / 20.0
+                appendLine("$t,10,${kotlin.math.sin(t)},0,0,,3")
+                appendLine("$t,4,0,0,${kotlin.math.cos(t) * 0.5},,3")
+            }
+        })
         SessionRepository.refresh()
         ui.waitUntil(5000) { SessionRepository.sessions.value.any { it.id==fixture.id } }
         ui.onAllNodesWithText("Sessions").onLast().performClick()
+        screenshot("06-sessions")
         ui.onNodeWithText(fixture.title).performClick()
         ui.onNodeWithText("Lap sheet").assertIsDisplayed()
         screenshot("04-lap-sheet")
         ui.onNodeWithText("Timeline").performClick()
         ui.onNodeWithText("Motion timeline").assertIsDisplayed()
+        ui.waitUntil(5000) { ui.onAllNodesWithText("1001 acceleration samples", substring = true).fetchSemanticsNodes().isNotEmpty() }
+        screenshot("07-timeline")
         ui.onNodeWithText("Details").performClick()
         ui.onNodeWithText("Session details").assertIsDisplayed()
+        screenshot("08-details")
         ui.onNodeWithText("Kart, conditions, notes").performTextInput("Persist across recreation")
         closeSoftKeyboard()
         ui.activityRule.scenario.recreate()
@@ -89,5 +114,25 @@ class NavigationTest {
             SessionRepository.save(fixture.copy(notes="Stale write after delete"))
         }
         ui.waitUntil(5000) { SessionStore(ui.activity).list().none { it.id==fixture.id } }
+    }
+
+    @Test fun recordingCanBeStoppedAndSaved() {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
+                ui.activity.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        ui.onNodeWithText("Start recording").performClick()
+        try {
+            ui.waitUntil(5000) { RecorderService.active.value }
+            ui.onNodeWithText("Recording · screen can be locked").assertIsDisplayed()
+            ui.onNodeWithText("Stop & save").assertIsDisplayed()
+            screenshot("09-recording")
+            ui.onNodeWithText("Stop & save").performClick()
+            ui.waitUntil(5000) { !RecorderService.active.value }
+            ui.onNodeWithText("Start recording").assertIsDisplayed()
+        } finally {
+            ui.activity.startService(android.content.Intent(ui.activity, RecorderService::class.java)
+                .setAction(RecorderService.STOP))
+        }
     }
 }
