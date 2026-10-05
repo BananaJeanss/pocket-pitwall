@@ -1,6 +1,6 @@
 # Signed Android releases
 
-The release workflow publishes an APK and `SHA256SUMS.txt` to GitHub Releases after core tests, release lint and signed APK assembly succeed. It refuses missing credentials and never substitutes a disposable debug key.
+The release workflow publishes matching phone and Wear OS APKs and `SHA256SUMS.txt` to GitHub Releases after core/protocol and phone/watch unit tests, release lint and signed APK assembly succeed. It refuses missing credentials and never substitutes a disposable debug key.
 
 ## One-time signing setup
 
@@ -25,9 +25,9 @@ Keep these as secrets, not repository variables. The workflow writes the key onl
 
 ## Publish
 
-1. Increment both `versionCode` and `versionName` in `app/build.gradle.kts`; never reuse a version code.
+1. Increment both `versionCode` and `versionName` in both `app/build.gradle.kts` and `wear/build.gradle.kts`; never reuse a version code.
 2. Push the version bump to `main`.
-3. The **Publish signed release** workflow runs core tests and release lint, builds and verifies the signed APK, creates the matching `vMAJOR.MINOR.PATCH` tag, then publishes the GitHub Release automatically.
+3. The **Publish signed release** workflow runs all unit suites and release lint, builds and verifies both signed APKs and their matching signing certificates, creates the matching `vMAJOR.MINOR.PATCH` tag, then publishes the GitHub Release automatically.
 4. If that version tag already exists, an automatic run skips publishing instead of overwriting it. The workflow can also be manually dispatched for an existing tag when recovery is needed.
 
 Automatic update checks use GitHub's latest stable release, compare semantic version numbers, and require an APK asset. Prereleases are ignored. Checks are limited to once per day on launch unless manually requested. The download action opens GitHub; installation is always controlled by Android and the user. No self-install permissions or background installer are used.

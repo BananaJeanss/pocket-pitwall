@@ -133,14 +133,19 @@ jobs:
 
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
-      - name: Test, lint and build signed APK
-        run: gradle --no-daemon :core:check :app:lintRelease :app:assembleRelease
+      - name: Test, lint and build signed phone and watch APKs
+        run: gradle --no-daemon :core:check :protocol:test :app:testDebugUnitTest :wear:testDebugUnitTest :app:lintRelease :wear:lintRelease :app:assembleRelease :wear:assembleRelease
 
       - name: Verify signing and stage assets
         run: |
           mkdir -p release-assets
           cp app/build/outputs/apk/release/app-release.apk "release-assets/pocket-pitwall-${RELEASE_TAG}.apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "release-assets/pocket-pitwall-${RELEASE_TAG}.apk"
+          cp wear/build/outputs/apk/release/wear-release.apk "release-assets/pocket-pitwall-wear-${RELEASE_TAG}.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "release-assets/pocket-pitwall-wear-${RELEASE_TAG}.apk"
+          PHONE_CERT=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "release-assets/pocket-pitwall-${RELEASE_TAG}.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          WATCH_CERT=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "release-assets/pocket-pitwall-wear-${RELEASE_TAG}.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          test -n "$PHONE_CERT" && test "$PHONE_CERT" = "$WATCH_CERT"
           cd release-assets
           sha256sum *.apk > SHA256SUMS.txt
 

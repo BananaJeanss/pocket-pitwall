@@ -62,7 +62,11 @@ class RecorderService : Service(), SensorEventListener {
                 val sensors=listOf(Sensor.TYPE_LINEAR_ACCELERATION,Sensor.TYPE_GYROSCOPE,Sensor.TYPE_GAME_ROTATION_VECTOR).mapNotNull { manager.getDefaultSensor(it) }
                 require(sensors.any { it.type==Sensor.TYPE_LINEAR_ACCELERATION } && sensors.any { it.type==Sensor.TYPE_GYROSCOPE }) { "Linear acceleration and gyroscope sensors are required." }
                 origin=SystemClock.elapsedRealtimeNanos(); lastFlush=origin
-                session=Session(title=title,direction=direction,sensors=sensors.joinToString("; ") { "${it.type}: ${it.name} (${it.vendor})" })
+                session=Session(
+                    title=title, direction=direction,
+                    phoneStartElapsedNanos=origin,
+                    sensors=sensors.joinToString("; ") { "${it.type}: ${it.name} (${it.vendor})" }
+                )
                 store.save(session!!)
                 output=FileOutputStream(store.raw(session!!.id))
                 writer=output!!.bufferedWriter().apply { write("elapsed_s,sensor_type,x,y,z,w,accuracy\n"); flush() }
@@ -70,6 +74,8 @@ class RecorderService : Service(), SensorEventListener {
                 sensors.forEach { require(manager.registerListener(this,it,20_000,handler)) { "Could not start sensor ${it.name}" } }
                 handler.post(ticker)
                 handler.postDelayed({ finish("complete") },3_600_000)
+                // Tell the watch to start its own local recording (best effort).
+                WatchLink.onPhoneSessionStarted(session!!.id, title, direction)
             } catch(e: Exception) { error.value=e.message ?: "Recording failed"; finish("interrupted") }
         }
         return START_NOT_STICKY
@@ -121,6 +127,8 @@ class RecorderService : Service(), SensorEventListener {
                     "Could not save session metadata: ${it.message}"
                 }
             }
+            // Tell the watch to finalize its log and queue the transfer.
+            WatchLink.onPhoneSessionStopped(finished.id, applicationContext)
         }
 
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }

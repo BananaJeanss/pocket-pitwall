@@ -72,6 +72,25 @@ internal fun time(v: Double): String = if(v.isFinite()) String.format(Locale.US,
     if (section == 3) {
     Text("Session details",style=MaterialTheme.typography.titleLarge)
     Text("${s.direction} · ${s.status} · ${time(s.duration)} s",color=MaterialTheme.colorScheme.secondary)
+    s.watch?.let { watch ->
+        Text("Watch telemetry",style=MaterialTheme.typography.titleMedium)
+        val quality = watch.sync?.quality
+        Text(buildString {
+            append("${watch.deviceModel} · ${watch.sampleCount} samples · ")
+            append(if (watch.logComplete) "complete" else "INCOMPLETE (crash or truncated)")
+            if (quality != null) append(" · clock sync ${quality.name.lowercase()}")
+        },style=MaterialTheme.typography.bodySmall)
+        if (!watch.logComplete) {
+            Text(
+                "Part of this watch recording was lost. Derived metrics are marked unreliable.",
+                style=MaterialTheme.typography.bodySmall,
+                color=MaterialTheme.colorScheme.error
+            )
+        }
+        watch.sensorRates.filter { it.value > 0 }.forEach { (type, hz) ->
+            Text("$type @ %.0f Hz".format(hz),style=MaterialTheme.typography.labelSmall)
+        }
+    }
     OutlinedTextField(name,{name=it.take(100); save(s.copy(title=name.ifBlank { "Untitled session" }))},label={Text("Session name")},modifier=Modifier.fillMaxWidth())
     OutlinedTextField(notes,{notes=it.take(2000); save(s.copy(notes=notes))},label={Text("Kart, conditions, notes")},modifier=Modifier.fillMaxWidth())
     OutlinedTextField(length,{length=it},label={Text("Known lap length in metres (optional)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
