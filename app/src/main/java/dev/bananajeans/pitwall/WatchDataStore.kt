@@ -6,6 +6,7 @@ import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.Messages
 import dev.bananajeans.pitwall.protocol.WatchLogCodec
 import dev.bananajeans.pitwall.protocol.WatchLogImporter
+import dev.bananajeans.pitwall.protocol.WatchLogTransfer
 import dev.bananajeans.pitwall.protocol.WristAnalysis
 import java.io.File
 import java.io.FileOutputStream
@@ -27,7 +28,7 @@ import kotlinx.coroutines.tasks.await
  * Process-scoped singleton: exactly one ChannelClient callback registered
  * for the lifetime of the phone app process.
  */
-class WatchTransferManager private constructor(private val context: Context) {
+class WatchTransferManager internal constructor(private val context: Context) {
 
     data class TransferState(
         /** Session ids currently being received. */
@@ -60,6 +61,25 @@ class WatchTransferManager private constructor(private val context: Context) {
     fun start() {
         if (callbackRegistered.compareAndSet(false, true)) {
             channelClient.registerChannelCallback(channelCallback)
+            scope.launch {
+                // Repair an attachment interrupted after durable raw import.
+                importer.importedIds().forEach { id ->
+                    runCatching {
+                        val file = requireNotNull(importer.importedFile(id))
+                        val log = file.inputStream().use { stream ->
+                            when (val read = WatchLogCodec.read(stream)) {
+                                is WatchLogCodec.ReadResult.Complete -> read.log
+                                is WatchLogCodec.ReadResult.Incomplete -> read.log
+                            }
+                        }
+                        attachToSession(id, WatchLogImporter.Result.Imported(log, file))
+                    }
+                }
+                while (callbackRegistered.get()) {
+                    if (!RecorderService.active.value) pullPending()
+                    kotlinx.coroutines.delay(15_000)
+                }
+            }
         }
     }
 
@@ -118,6 +138,7 @@ class WatchTransferManager private constructor(private val context: Context) {
                     tempDir.mkdirs()
                     val tempFile = File.createTempFile("import-$sessionId-", ".pwtch", tempDir)
                     try {
+                        val sourceMeta = WatchLogTransfer.readMetadata(input)
                         val output = FileOutputStream(tempFile)
                         try {
                             input.use { it.copyTo(output) }
@@ -128,7 +149,7 @@ class WatchTransferManager private constructor(private val context: Context) {
                         }
                         
                         // Import directly from the temp file (no readBytes() copy)
-                        val result = importer.importFromFile(sessionId, tempFile)
+                        val result = importer.importFromFile(sessionId, tempFile, sourceMeta)
                         when (result) {
                             is WatchLogImporter.Result.Imported -> {
                                 state.set(
@@ -149,6 +170,9 @@ class WatchTransferManager private constructor(private val context: Context) {
                                     )
                                 )
                                 ack(sessionId, accepted = true, reason = null)
+                                importer.importedFile(sessionId)?.let { file ->
+                                    attachToSession(sessionId, WatchLogImporter.Result.Imported(result.log, file))
+                                }
                             }
                             is WatchLogImporter.Result.Rejected -> {
                                 state.set(
@@ -203,7 +227,7 @@ class WatchTransferManager private constructor(private val context: Context) {
      * watch-logs as an orphan rather than being dropped or guessed onto an
      * unrelated session.
      */
-    private fun attachToSession(sessionId: String, result: WatchLogImporter.Result.Imported) {
+    internal fun attachToSession(sessionId: String, result: WatchLogImporter.Result.Imported) {
         try {
             val store = SessionStore(context)
             if (!RecorderService.active.value) store.recover()
@@ -218,7 +242,8 @@ class WatchTransferManager private constructor(private val context: Context) {
                 .filter { (_, deltaMillis) -> deltaMillis <= OFFLINE_MATCH_WINDOW_MILLIS }
                 .minByOrNull { (_, deltaMillis) -> deltaMillis }
                 ?.first
-                ?: return
+                ?: createWatchOnlySession(store, sessionId, result.log)
+            if (session.watch?.status == WatchSessionInfo.Status.IMPORTED) return
             val inSession = File(File(context.filesDir, "sessions"), session.id).apply { mkdirs() }
             val logName = "watch.pwtch"
             result.storedAt.inputStream().use { input ->
@@ -229,7 +254,7 @@ class WatchTransferManager private constructor(private val context: Context) {
             // session at its start, and the phone monotonic anchor persisted
             // when the session was created. Never the global latest fit, and
             // never the watch's monotonic value from log metadata.
-            val sync = WatchLink.captureSyncForSession(session.id) ?: WatchLink.captureSyncForSession()
+            val sync = if (session.phoneStartElapsedNanos > 0L) WatchLink.captureSyncForSession(session.id) else null
             val phoneStart = session.phoneStartElapsedNanos.takeIf { it > 0L }
                 ?: result.log.metadata.startedAtMonotonicNanos.let { watchStart ->
                     // Legacy sessions recorded before the anchor existed:
@@ -306,6 +331,32 @@ class WatchTransferManager private constructor(private val context: Context) {
         } catch (_: Exception) {
             // Session attachment is best-effort; the raw log remains stored.
         }
+    }
+
+    private fun createWatchOnlySession(store: SessionStore, id: String, log: WatchLogCodec.WatchLog): Session {
+        val origin = log.metadata.startedAtMonotonicNanos
+        val samples = log.samples.filter { it.timestampNanos >= origin }.sortedBy { it.timestampNanos }
+        val session = Session(
+            id = id,
+            created = log.metadata.startedAtWallMillis,
+            title = "Watch · ${log.metadata.notes?.takeIf { it.isNotBlank() } ?: "Kart session"}",
+            status = if (log.complete) "complete" else "interrupted",
+            duration = samples.lastOrNull()?.let { (it.timestampNanos - origin) / 1e9 } ?: 0.0,
+            sensors = log.metadata.sensorInfo.joinToString("; ") { "${it.type}: ${it.name}" },
+            notes = "Watch-only recording. Accelerometer data includes gravity. No phone clock synchronization."
+        )
+        val file = store.raw(id)
+        FileOutputStream(file).use { output ->
+            val writer = output.bufferedWriter()
+            writer.write("elapsed_s,sensor_type,x,y,z,w,accuracy\n")
+            samples.forEach { sample ->
+                writer.write("${(sample.timestampNanos - origin) / 1e9},${sample.sensorType},${sample.x},${sample.y},${sample.z},${sample.w},${sample.accuracy}\n")
+            }
+            writer.flush()
+            output.fd.sync()
+        }
+        store.save(session)
+        return session
     }
 
     /** Phone tells the watch to send its pending logs. */

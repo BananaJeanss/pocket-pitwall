@@ -4,6 +4,7 @@ import android.content.Context
 import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Wearable
 import dev.bananajeans.pitwall.protocol.Messages
+import dev.bananajeans.pitwall.protocol.WatchLogTransfer
 import java.io.File
 import java.io.FileOutputStream
 import kotlinx.coroutines.CoroutineScope
@@ -75,6 +76,7 @@ class TransferQueue(private val context: Context) {
      * connected phone node. Idempotent; safe on duplicate requests.
      */
     fun serveAll() {
+        refreshPendingCount()
         if (System.currentTimeMillis() < retryAfter) return
         if (RecorderService.status.recording) return // don't steal bandwidth mid-session
         val pending = store.pendingTransfer()
@@ -94,10 +96,11 @@ class TransferQueue(private val context: Context) {
     private suspend fun openAndStream(nodeId: String, sessionId: String) {
         val file: File = store.logFile(sessionId)
         if (!file.isFile) return
+        val metadata = store.sourceMeta(sessionId) ?: return
         val channel = channelClient.openChannel(nodeId, channelPath(sessionId)).await()
         try {
             channelClient.getOutputStream(channel).await().use { output ->
-                file.inputStream().use { input -> input.copyTo(output) }
+                file.inputStream().use { input -> WatchLogTransfer.write(input, metadata, output) }
                 output.flush()
             }
         } catch (_: Exception) {

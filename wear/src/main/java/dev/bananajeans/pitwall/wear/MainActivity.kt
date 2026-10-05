@@ -52,8 +52,8 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Recover orphaned recordings from a previous process/watch restart.
-        WatchLogStore(this).recover()
+        // Process-start recovery belongs to PitwallWatchApplication. Activity
+        // recreation can happen while a live foreground recorder owns the log.
         // BODY_SENSORS is needed only for optional heart-rate; IMU recording
         // works without it (issue #24 tolerance contract).
         if (HeartRateRecorder.needsPermission(this)) {

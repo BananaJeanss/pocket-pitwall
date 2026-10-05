@@ -77,10 +77,8 @@ class WearConnection(private val context: Context, private val transferQueue: Tr
     fun start() {
         messageClient.addListener(messageListener)
         refreshNodes()
-        // Convert crash orphans (RECORDING without a live writer) to
-        // FINALIZED + source sidecar BEFORE any Start/Stop can be decided,
-        // so durable-state answers see consistent disk state (issue #19).
-        diskExecutor.execute { runCatching { store.recover() } }
+        // Application recovery has completed before listeners are registered.
+        // Running another recovery asynchronously can finalize a new live log.
         scope.launch {
             while (true) {
                 refreshNodes()

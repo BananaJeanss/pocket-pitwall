@@ -20,6 +20,7 @@ import java.io.File
  * BYTE-FOR-BYTE.
  */
 @RunWith(RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(application = android.app.Application::class, sdk = [35])
 class RestartReplayDurabilityTest {
 
     private lateinit var store: WatchLogStore

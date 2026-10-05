@@ -19,6 +19,7 @@ import java.io.File
  * crash recovery, retention cleanup and idempotent finalization.
  */
 @RunWith(RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(application = android.app.Application::class, sdk = [35])
 class WatchLogStoreTest {
 
     private lateinit var store: WatchLogStore
@@ -120,6 +121,24 @@ class WatchLogStoreTest {
         val read = WatchLogCodec.read(store.logFile("sess-b").inputStream())
         assertTrue(read is WatchLogCodec.ReadResult.Incomplete)
         assertEquals(1, (read as WatchLogCodec.ReadResult.Incomplete).log.samples.size)
+    }
+
+    @Test
+    fun recoveryDoesNotFinalizeTheLiveRecorder() {
+        store.startRecording("live-session")
+        val (writer, stream) = store.writer("live-session", metadata("live-session"))
+        writer.appendSamples(4, listOf(WatchLogCodec.Sample(4, 10_000_000_100L, 1.0, 0.0, 0.0, 0.0, 3)))
+        stream.fd.sync()
+        val bytes = store.logFile("live-session").readBytes()
+        val recovery = store.recover(activeSessionId = "live-session")
+        assertEquals(0, recovery.recoveredUnfinalized)
+        assertEquals(WatchLogStore.State.RECORDING, store.stateOf("live-session"))
+        assertNull(store.sourceMeta("live-session"))
+        assertTrue(bytes.contentEquals(store.logFile("live-session").readBytes()))
+        writer.finish()
+        stream.close()
+        store.markFinalized("live-session", true)
+        assertTrue(store.sourceMeta("live-session")!!.complete)
     }
 
     @Test

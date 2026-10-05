@@ -180,10 +180,11 @@ class WatchLogStore(private val context: Context) {
      * incomplete log so it participates in transfer and never silently
      * disappears. Imported logs past retention are cleaned up (issue #21).
      */
-    fun recover(): RecoveryResult {
+    fun recover(activeSessionId: String? = RecorderService.status.takeIf { it.recording }?.sessionId): RecoveryResult {
         var recoveredUnfinalized = 0
         var cleaned = 0
         for (entry in list()) {
+            if (entry.sessionId == activeSessionId) continue
             if (entry.state == State.RECORDING) {
                 // The log file has no trailer (the writer died); keep it as an
                 // incomplete finalized log rather than losing it.

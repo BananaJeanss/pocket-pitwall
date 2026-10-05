@@ -244,7 +244,7 @@ class SessionStore(context: Context) {
                 val t=p[0].toDoubleOrNull(); val type=p[1].toIntOrNull()
                 val x=p[2].toDoubleOrNull(); val y=p[3].toDoubleOrNull(); val z=p[4].toDoubleOrNull()
                 if (t!=null && x!=null && y!=null && z!=null && t.isFinite() && x.isFinite() && y.isFinite() && z.isFinite()) {
-                    val target=when(type) { 10 -> a; 4 -> g; else -> null }
+                    val target=when(type) { 1, 10 -> a; 4 -> g; else -> null }
                     if (target!=null && (target.isEmpty() || t>target.last().t)) {
                         if (target.isNotEmpty() && t-target.last().t>.25) gaps++
                         target.add(Telemetry.Point(t,sqrt(x*x+y*y+z*z)))

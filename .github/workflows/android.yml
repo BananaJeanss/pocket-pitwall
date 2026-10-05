@@ -31,7 +31,7 @@ jobs:
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Test, lint and assemble
-        run: gradle --no-daemon :core:check :protocol:test :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest :wear:lintDebug :wear:assembleDebug
+        run: gradle --no-daemon :core:check :protocol:test :app:testDebugUnitTest :wear:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest :wear:lintDebug :wear:assembleDebug
       - uses: actions/upload-artifact@v7
         name: Upload phone debug APK
         with:
@@ -75,4 +75,7 @@ jobs:
           path: |
             app/build/reports/lint-results-debug.html
             wear/build/reports/lint-results-debug.html
+            app/build/reports/tests/
+            wear/build/reports/tests/
+            protocol/build/reports/tests/
           if-no-files-found: ignore

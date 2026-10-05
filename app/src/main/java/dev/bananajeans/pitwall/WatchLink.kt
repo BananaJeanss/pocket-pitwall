@@ -331,7 +331,7 @@ object WatchLink {
      */
     fun captureSyncForSession(sessionId: String? = null): ClockSync.Fit? {
         if (sessionId != null) {
-            synchronized(sessionFits) { sessionFits[sessionId] }?.let { return it }
+            return synchronized(sessionFits) { sessionFits[sessionId] }
         }
         return state.get().lastSyncFit
     }

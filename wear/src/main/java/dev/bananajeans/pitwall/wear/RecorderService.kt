@@ -365,12 +365,15 @@ class RecorderService : Service(), SensorEventListener {
             writer = null
             if (wake?.isHeld == true) wake?.release()
         }
+        // A phone may immediately pull after StopAck; publish the idle state
+        // first so the transfer queue does not discard that pull as mid-session.
+        update { it.copy(recording = false, healthy = false) }
         sessionId?.let {
             store.markFinalized(it, finalizedOk)
             // Signal that real stop/finalization completed; WearConnection will ACK the phone.
             triggerStopCallback(it, finalizedOk)
         }
-        update { it.copy(recording = false, healthy = false) }
+        (application as PitwallWatchApplication).transferQueue.serveAll()
         Handler(Looper.getMainLooper()).post {
             if (Build.VERSION.SDK_INT >= 33) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
             stopSelf()
