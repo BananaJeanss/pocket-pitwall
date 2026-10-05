@@ -32,6 +32,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -52,6 +53,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         SessionRepository.initialize(applicationContext)
         WatchLink.initialize(applicationContext)
         transferManager = WatchTransferManager.getInstance(this)
@@ -65,7 +67,10 @@ class MainActivity : ComponentActivity() {
                 dark -> darkColorScheme(primary=Lime, secondary=Cyan, background=Color(0xFF101410), surface=Color(0xFF181E18), onPrimary=Color(0xFF243400))
                 else -> lightColorScheme(primary=Color(0xFF446600), secondary=Color(0xFF006A65))
             }
-            LaunchedEffect(dark, settings.fullscreen) {
+            LaunchedEffect(dark, settings.fullscreen, colors.background) {
+                // Transparent system bars also reveal the window background
+                // during launch/recreation, before Compose draws that region.
+                window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(colors.background.toArgb()))
                 val bar = if (dark) SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
                     else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
                 enableEdgeToEdge(statusBarStyle=bar, navigationBarStyle=bar)

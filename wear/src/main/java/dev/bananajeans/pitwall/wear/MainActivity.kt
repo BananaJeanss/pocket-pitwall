@@ -7,6 +7,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -118,31 +119,62 @@ private fun WatchApp() {
         pending = (context.applicationContext as PitwallWatchApplication).transferQueue.pendingCount()
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        TimeText()
+    WatchScreen(
+        status = status,
+        pending = pending.coerceAtLeast(0),
+        phoneConnected = connection.phoneConnected,
+        result = results.firstOrNull().takeIf { showResult },
+        resultsAvailable = results.isNotEmpty(),
+        showDiagnostics = showDiagnostics,
+        onStop = { stopTestRecording(context) },
+        onStart = { startTestRecording(context) },
+        onToggleDiagnostics = { showDiagnostics = !showDiagnostics },
+        onShowResults = { showResult = true },
+        onDismissResults = { showResult = false }
+    )
+}
+
+/** The production screen also renders deterministic instrumentation fixtures. */
+@Composable
+internal fun WatchScreen(
+    status: RecorderStatus = RecorderStatus(),
+    pending: Int = 0,
+    phoneConnected: Boolean = false,
+    result: dev.bananajeans.pitwall.protocol.Messages.Result? = null,
+    resultsAvailable: Boolean = false,
+    showDiagnostics: Boolean = false,
+    onStop: () -> Unit = {},
+    onStart: () -> Unit = {},
+    onToggleDiagnostics: () -> Unit = {},
+    onShowResults: () -> Unit = {},
+    onDismissResults: () -> Unit = {}
+) {
+    val scroll = rememberScrollState()
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        // Let review/diagnostic text scroll through the top edge without
+        // drawing a second line of text over it.
+        if (scroll.value == 0) TimeText()
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 26.dp),
+                .verticalScroll(scroll)
+                .padding(horizontal = 14.dp, vertical = if (status.recording) 22.dp else 26.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             when {
-                status.recording -> RecordingPanel(status, connection.phoneConnected, onStop = { stopTestRecording(context) })
-                showResult && results.isNotEmpty() -> ResultPanel(results.first(), onDone = { showResult = false })
+                status.recording -> RecordingPanel(status, phoneConnected, onStop)
+                result != null -> ResultPanel(result, onDone = onDismissResults)
                 else -> IdlePanel(
-                    context = context,
-                    pending = pending.coerceAtLeast(0),
-                    phoneConnected = connection.phoneConnected,
+                    pending = pending,
+                    phoneConnected = phoneConnected,
                     showDiagnostics = showDiagnostics,
-                    resultsAvailable = results.isNotEmpty(),
+                    resultsAvailable = resultsAvailable,
                     hasError = status.error != null,
                     errorMessage = status.error,
-                    onToggleDiagnostics = { showDiagnostics = !showDiagnostics },
-                    onShowResults = { showResult = true },
-                    onStartTest = { startTestRecording(context) },
-                    onStopTest = { stopTestRecording(context) }
+                    onToggleDiagnostics = onToggleDiagnostics,
+                    onShowResults = onShowResults,
+                    onStartTest = onStart
                 )
             }
             if (showDiagnostics) DiagnosticsPanel()
@@ -155,7 +187,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
     Text(
         text = "REC",
         color = Color(0xFFFF5252),
-        style = MaterialTheme.typography.displayMedium,
+        style = MaterialTheme.typography.displaySmall,
         modifier = Modifier.semantics { contentDescription = "Recording in progress" }
     )
     Text(
@@ -165,6 +197,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
     )
     Text(
         text = if (status.healthy) "logging OK · ${status.samples} samples" else "logging problem",
+        style = MaterialTheme.typography.labelSmall,
         color = if (status.healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
@@ -172,7 +205,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
     Text(
         text = when {
             status.healthy && phoneConnected -> "phone connected"
-            status.healthy -> "phone away · logging safely on watch"
+            status.healthy -> "phone away · logging on watch"
             else -> "check watch storage"
         },
         style = MaterialTheme.typography.labelSmall,
@@ -184,7 +217,6 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
 
 @Composable
 private fun IdlePanel(
-    context: Context,
     pending: Int,
     phoneConnected: Boolean,
     showDiagnostics: Boolean,
@@ -193,8 +225,7 @@ private fun IdlePanel(
     errorMessage: String?,
     onToggleDiagnostics: () -> Unit,
     onShowResults: () -> Unit,
-    onStartTest: () -> Unit,
-    onStopTest: () -> Unit
+    onStartTest: () -> Unit
 ) {
     Text(
         text = "Pocket Pitwall",

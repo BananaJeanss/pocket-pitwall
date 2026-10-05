@@ -104,7 +104,7 @@ APK: `app/build/outputs/apk/debug/app-debug.apk`. A wrapper binary is not includ
 gradle :app:connectedDebugAndroidTest
 ```
 
-CI runs the analysis/version checks, Android lint, debug build and Android 15 emulator navigation tests. It saves test reports and screenshots as artifacts. Release CI separately tests, lints, signs, verifies and publishes versioned APKs with SHA-256 checksums. [Signing and publishing instructions](docs/releases.md).
+CI runs the analysis/version checks, unit tests, Android lint, debug builds and Android 15 phone navigation/recording tests. Round Wear OS 5 emulators cover both small and large displays using the production watch screen with deterministic ready, recording, disconnected, queued-log, error and result fixtures. Each run uploads PNGs, test reports and logcat in `android-ui-results` and `wear-ui-wearos_{small,large}_round`, including failure screenshots. Missing expected captures fail CI. These are interaction tests and captures for visual review; they do not compare pixels against golden images. Locally, run `./scripts/test-android.sh` for the phone or `./scripts/test-android.sh wear` with a round watch emulator connected. Release CI separately tests, lints, signs, verifies and publishes versioned APKs with SHA-256 checksums. [Signing and publishing instructions](docs/releases.md).
 
 ## Known limits
 
