@@ -271,6 +271,7 @@ object WatchLink {
         scope.launch {
             var attempt = 0
             while (attempt < maxAttempts) {
+                if (!synchronized(control) { control.shouldRetry(message) }) return@launch
                 // Check if we already have the matching ACK
                 val snap = synchronized(control) { control.snapshot }
                 when (message) {
@@ -288,7 +289,7 @@ object WatchLink {
                 }
 
                 // Not yet acked - try to send
-                val success = sendBlocking(message)
+                val success = runCatching { sendBlocking(message) }.getOrDefault(false)
                 if (!success) {
                     // Send failed at transport level - will retry
                 }

@@ -53,6 +53,15 @@ class SessionControl(private val now: () -> Long = System::nanoTime) {
                 (now() - pendingSince) / 1_000_000 else 0
         )
 
+    /** Old retry jobs must never resurrect a stopped or superseded recording. */
+    fun shouldRetry(message: Messages.Message): Boolean = when (message) {
+        is Messages.Start -> message.sessionId == sessionId && message.startSeq == startSeq &&
+            state == CommandState.PENDING_START
+        is Messages.Stop -> message.sessionId == sessionId && message.stopSeq == stopSeq &&
+            state == CommandState.PENDING_STOP
+        else -> false
+    }
+
     /**
      * Begin controlling a session. Returns the [Messages.Start] to send, or
      * null when a start for this session is already in flight/acked (retry
