@@ -444,6 +444,7 @@ class MainActivity : ComponentActivity() {
     val context = LocalContext.current
     val manager = remember { WatchTransferManager.getInstance(context) }
     var transfer by remember { mutableStateOf(manager.currentState) }
+    var showDetails by remember { mutableStateOf(false) }
     LaunchedEffect(manager) {
         while (true) {
             transfer = manager.currentState
@@ -455,7 +456,7 @@ class MainActivity : ComponentActivity() {
             Text("Watch sync", style = MaterialTheme.typography.titleMedium)
             Text(when {
                 transfer.active.isNotEmpty() -> "Receiving ${transfer.active.size} watch recording(s)…"
-                transfer.lastError != null -> "Sync failed: ${transfer.lastError}"
+                transfer.lastError != null -> watchSyncErrorSummary(transfer.lastError!!)
                 recording -> "Sync resumes after recording stops"
                 transfer.connected == false -> "Watch disconnected · open Pocket Pitwall on the watch and reconnect"
                 transfer.imported.isNotEmpty() -> "${transfer.imported.size} watch recording(s) imported"
@@ -466,8 +467,22 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.width(8.dp))
                 Text("Sync watch now")
             }
+            transfer.lastError?.let { error ->
+                TextButton(onClick = { showDetails = !showDetails }) { Text(if (showDetails) "Hide sync details" else "Sync details") }
+                if (showDetails) Text(error, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
+}
+
+internal fun watchSyncErrorSummary(error: String): String = when {
+    error.contains("API_UNAVAILABLE") || error.contains("Wearable.API is not available") ->
+        "Watch connection unavailable. Reconnect in your watch companion app, then retry."
+    error.contains("Unsupported watch transfer") || error.contains("without source metadata") ->
+        "Update Pocket Pitwall on both phone and watch, then retry."
+    error.contains("truncated", ignoreCase = true) || error.contains("hash mismatch", ignoreCase = true) ->
+        "Transfer interrupted. The watch keeps this recording; reconnect and retry."
+    else -> "Watch sync failed. Keep both apps open and retry; see Sync details if it continues."
 }
 
 /** One-line watch availability indicator; absent/invisible when no watch exists. */
