@@ -148,13 +148,16 @@ internal fun WatchScreen(
     onShowResults: () -> Unit = {},
     onDismissResults: () -> Unit = {}
 ) {
+    val scroll = rememberScrollState()
     Box(modifier = Modifier.fillMaxSize()) {
-        TimeText()
+        // Let review/diagnostic text scroll through the top edge without
+        // drawing a second line of text over it.
+        if (scroll.value == 0) TimeText()
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 26.dp),
+                .verticalScroll(scroll)
+                .padding(horizontal = 14.dp, vertical = if (status.recording) 22.dp else 26.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -183,7 +186,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
     Text(
         text = "REC",
         color = Color(0xFFFF5252),
-        style = MaterialTheme.typography.displayMedium,
+        style = MaterialTheme.typography.displaySmall,
         modifier = Modifier.semantics { contentDescription = "Recording in progress" }
     )
     Text(
@@ -193,6 +196,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
     )
     Text(
         text = if (status.healthy) "logging OK · ${status.samples} samples" else "logging problem",
+        style = MaterialTheme.typography.labelSmall,
         color = if (status.healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         textAlign = TextAlign.Center
     )
@@ -200,7 +204,7 @@ private fun RecordingPanel(status: RecorderStatus, phoneConnected: Boolean, onSt
     Text(
         text = when {
             status.healthy && phoneConnected -> "phone connected"
-            status.healthy -> "phone away · logging safely on watch"
+            status.healthy -> "phone away · logging on watch"
             else -> "check watch storage"
         },
         style = MaterialTheme.typography.labelSmall,

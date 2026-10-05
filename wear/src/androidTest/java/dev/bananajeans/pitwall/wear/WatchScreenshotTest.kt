@@ -4,6 +4,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.core.app.ActivityScenario
 import androidx.wear.compose.material3.MaterialTheme
 import dev.bananajeans.pitwall.protocol.Messages
 import java.io.FileInputStream
@@ -40,9 +41,10 @@ class WatchScreenshotTest {
     }
 
     private fun screenshot(name: String) {
-        ui.waitUntil(5000) { ui.activity.hasWindowFocus() }
         ui.waitForIdle()
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        // The cold Wear OS launch overlay can outlive the first Compose frame.
+        ui.waitUntil(20000) { ui.activity.hasWindowFocus() }
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5000)
         capture(name)
     }
@@ -77,7 +79,7 @@ class WatchScreenshotTest {
         ui.onNodeWithText("Stop & save").performScrollTo().assertIsDisplayed()
         screenshot("03-recording-connected")
         ui.runOnIdle { connected.value = false }
-        ui.onNodeWithText("phone away · logging safely on watch").assertIsDisplayed()
+        ui.onNodeWithText("phone away · logging on watch").assertIsDisplayed()
         screenshot("04-recording-offline")
         ui.onNodeWithText("Stop & save").performClick()
         assertTrue(stopped)
@@ -115,5 +117,24 @@ class WatchScreenshotTest {
         screenshot("08-results-warning")
         ui.onNodeWithText("Done").performClick()
         assertTrue(dismissed)
+    }
+
+    @Test fun productionActivityLaunch() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        for (permission in listOf(android.Manifest.permission.BODY_SENSORS,
+            android.Manifest.permission.POST_NOTIFICATIONS)) {
+            instrumentation.uiAutomation.grantRuntimePermission(instrumentation.targetContext.packageName, permission)
+        }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            var activity: MainActivity? = null
+            scenario.onActivity { activity = it }
+            ui.waitForIdle()
+            instrumentation.waitForIdleSync()
+            ui.waitUntil(20000) { activity?.hasWindowFocus() == true }
+            ui.onNodeWithText("Ready (phone optional)").assertIsDisplayed()
+            ui.onNodeWithText("Record now").assertIsDisplayed()
+            instrumentation.uiAutomation.waitForIdle(250, 5000)
+            capture("09-production-ready")
+        }
     }
 }

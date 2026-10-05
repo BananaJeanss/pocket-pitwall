@@ -4,7 +4,7 @@ set -uo pipefail
 module="${1:-app}"
 case "$module" in
   app) expected=(01-record 02-settings 03-light-settings 04-lap-sheet 05-fullscreen 06-sessions 07-timeline 08-details 09-recording 10-dark-settings) ;;
-  wear) expected=(01-ready 02-sensors 03-recording-connected 04-recording-offline 05-pending 06-recorder-error 07-results 08-results-warning) ;;
+  wear) expected=(01-ready 02-sensors 03-recording-connected 04-recording-offline 05-pending 06-recorder-error 07-results 08-results-warning 09-production-ready) ;;
   *) echo "Expected app or wear" >&2; exit 2 ;;
 esac
 result=0
