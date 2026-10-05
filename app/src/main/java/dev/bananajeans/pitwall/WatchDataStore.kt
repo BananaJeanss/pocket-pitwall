@@ -233,9 +233,20 @@ class WatchTransferManager internal constructor(private val context: Context) {
             if (!RecorderService.active.value) store.recover()
             val sessions = store.list()
             val exact = sessions.firstOrNull { it.id == sessionId }
+            val watchStart = result.log.metadata.startedAtWallMillis
+            val watchDurationMillis = result.log.samples.maxOfOrNull {
+                ((it.timestampNanos - result.log.metadata.startedAtMonotonicNanos) / 1_000_000L).coerceAtLeast(0)
+            } ?: 0L
             val session = exact ?: sessions
                 .asSequence()
                 .filter { it.watch == null && it.status != "recording" }
+                .filter { candidate ->
+                    val phoneDurationMillis = (candidate.duration * 1000).toLong()
+                    val overlap = minOf(candidate.created + phoneDurationMillis, watchStart + watchDurationMillis) -
+                        maxOf(candidate.created, watchStart)
+                    phoneDurationMillis > 0 && watchDurationMillis > 0 &&
+                        overlap >= minOf(phoneDurationMillis, watchDurationMillis) / 2
+                }
                 .map { candidate ->
                     candidate to kotlin.math.abs(candidate.created - result.log.metadata.startedAtWallMillis)
                 }

@@ -76,10 +76,10 @@ object SessionPolicy {
      * the PWTCH trailer magic? Full CRC validation still happens at import.
      */
     fun logLooksComplete(file: File): Boolean {
-        if (!file.isFile || file.length() < 5L) return false
+        if (!file.isFile || file.length() < WatchLogCodec.TRAILER_SIZE) return false
         return try {
             RandomAccessFile(file, "r").use { raf ->
-                raf.seek(raf.length() - 5)
+                raf.seek(raf.length() - WatchLogCodec.TRAILER_SIZE)
                 val tail = ByteArray(5)
                 raf.readFully(tail)
                 String(tail, Charsets.US_ASCII) == WatchLogCodec.TRAILER_MAGIC

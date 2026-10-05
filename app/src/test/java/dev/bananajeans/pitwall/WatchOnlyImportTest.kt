@@ -69,4 +69,22 @@ class WatchOnlyImportTest {
         assertEquals(5.0, loaded.duration, 0.001)
         assertNotNull(loaded.watch)
     }
+
+    @Test fun nearbyButNonOverlappingPhoneSessionIsNotMatched() {
+        val old = Session(id = "previous-drive", created = 0, status = "complete", duration = 0.5)
+        store.save(old)
+        WatchTransferManager(context).attachToSession("later-watch-drive", imported("later-watch-drive"))
+        assertNull(store.list().single { it.id == old.id }.watch)
+        assertNotNull(store.list().single { it.id == "later-watch-drive" }.watch)
+    }
+
+    @Test fun overlappingStandaloneLogAttachesToPhoneSession() {
+        val phone = Session(id = "phone-overlap", created = 900, status = "complete", duration = 3.0)
+        store.save(phone)
+        store.raw(phone.id).writeText("phone samples stay intact")
+        WatchTransferManager(context).attachToSession("standalone-overlap", imported("standalone-overlap"))
+        assertEquals(1, store.list().size)
+        assertNotNull(store.list().single().watch)
+        assertEquals("phone samples stay intact", store.raw(phone.id).readText())
+    }
 }

@@ -114,8 +114,14 @@ class SessionPolicyTest {
     fun logLooksCompleteDetectsTrailerAndTruncation() {
         val tmp = File.createTempFile("pwtch", ".bin")
         try {
-            // Data + trailer magic ending exactly at EOF -> complete.
-            tmp.writeBytes(byteArrayOf(1, 2, 3) + "PWEND".toByteArray(Charsets.US_ASCII))
+            // Use the real writer: trailer magic is followed by CRC + length.
+            tmp.outputStream().use { output ->
+                val writer = dev.bananajeans.pitwall.protocol.WatchLogCodec.Writer(output,
+                    dev.bananajeans.pitwall.protocol.WatchLogCodec.Metadata(
+                        "trailer-test", "0.3.0", "Watch", 1000, 10_000_000_000, emptyList(), 1
+                    ))
+                writer.finish()
+            }
             assertTrue(SessionPolicy.logLooksComplete(tmp))
 
             // One byte short of the trailer -> truncated.
